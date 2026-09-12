@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.2';
+const VERSAO_APP = 'v4.3';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2944,10 +2944,18 @@ function planoExclusao(refs, opcoes){
     (DB.COMISSOES||[]).filter(c => c.CP_ID === cp.ID).forEach(c => add('COMISSOES', c.ID));
   };
 
-  (refs||[]).forEach(r => {
+  // fila em vez de forEach: um lançamento acrescenta as parcelas dele à fila,
+  // e o forEach não visitaria itens adicionados durante a própria iteração
+  const fila = (refs || []).slice();
+  while (fila.length){
+    const r = fila.shift();
     if (r.aba === 'LANCAMENTOS'){
       add('LANCAMENTOS', r.id);
-      (DB.PARCELAS||[]).filter(p => p.LANC_ID === r.id).forEach(p => refs.push({aba:'PARCELAS', id:p.ID}));
+      (DB.PARCELAS||[]).filter(p => p.LANC_ID === r.id).forEach(p => fila.push({aba:'PARCELAS', id:p.ID}));
+      // repasses ligados ao lançamento por fora das parcelas
+      (DB.CONTAS_PAGAR||[]).filter(c => c.CATEGORIA === 'Repasse a cliente'
+        && (DB.PARCELAS||[]).some(p => p.LANC_ID === r.id && p.ID === c.PARCELA_ID))
+        .forEach(c => incluirCP(c));
 
     } else if (r.aba === 'PARCELAS'){
       const p = parcDe(r.id); if (!p) return;
@@ -2969,7 +2977,7 @@ function planoExclusao(refs, opcoes){
       const cr = (DB.CONTAS_RECEBER||[]).find(x => x.CP_ID === cp.ID);
       if (cr && !vistos.has('CONTAS_RECEBER|' + cr.ID)) limparCR.add(cr.ID);
     }
-  });
+  }
 
   // movimentos voltam para pendentes; contas a receber que perderam o repasse ficam sem vínculo
   const atualizar = [];
