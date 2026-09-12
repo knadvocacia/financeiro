@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v3.9';
+const VERSAO_APP = 'v4.0';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2805,11 +2805,16 @@ function previaImportAcordos(linhas){
     const chave = semAcento(l.pasta) + '|' + rd(l.valorTotal);
     if (l.pasta && pastas.has(chave)){ repetidos++; return; }
     pastas.add(chave);
-    const base = rd(l.valorTotal - l.sucumbencia);
-    if (base < 0) { IMPAC_AVISOS.push('Pasta ' + (l.pasta||'—') + ': sucumbência maior que o valor do acordo.'); return; }
-    if (l.valorParcela && Math.abs(rd(l.valorParcela * l.qtd) - base) > 0.05)
+    // a sucumbência é cobrada junto: as parcelas dividem o valor total do acordo
+    if (l.sucumbencia > l.valorTotal){
+      IMPAC_AVISOS.push('Pasta ' + (l.pasta||'—') + ': sucumbência de ' + moeda(l.sucumbencia)
+        + ' maior que o acordo de ' + moeda(l.valorTotal) + ' — linha ignorada.');
+      return;
+    }
+    if (l.valorParcela && Math.abs(rd(l.valorParcela * l.qtd) - l.valorTotal) > 0.05)
       IMPAC_AVISOS.push('Pasta ' + (l.pasta||'—') + ': ' + l.qtd + ' x ' + moeda(l.valorParcela)
-        + ' não fecha com ' + moeda(base) + ' — a última parcela será ajustada.');
+        + ' = ' + moeda(rd(l.valorParcela * l.qtd)) + ', mas o acordo é de ' + moeda(l.valorTotal)
+        + ' — a última parcela será ajustada para fechar.');
     IMPAC.push(l);
   });
 
@@ -2826,7 +2831,7 @@ function previaImportAcordos(linhas){
     + '<th class="num">Valor</th><th class="num">Sucumbência</th><th>Parcelas</th>'
     + '<th class="num">Escritório</th><th class="num">Cliente</th><th>Observações</th></tr></thead><tbody>'
     + IMPAC.slice(0,150).map(l => {
-        const base = rd(l.valorTotal - l.sucumbencia);
+        const base = rd(l.valorTotal - l.sucumbencia);   // parte rateável, fora a sucumbência
         const esc2 = rd(l.sucumbencia + base * l.pctEsc / 100), cli = rd(base * l.pctCli / 100);
         return '<tr><td>'+pastaCliente(tit(l.pasta), tit(l.cliente))+'</td>'
           + '<td>'+dataBR(l.dataAcordo)+'</td><td>'+esc(l.audiencia||'—')+'</td>'
