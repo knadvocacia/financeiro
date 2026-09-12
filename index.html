@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.0';
+const VERSAO_APP = 'v4.2';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2635,7 +2635,7 @@ async function confirmarImportCP(){
 }
 
 /* ══════════════════ IMPORTAÇÃO DE ACORDOS ══════════════════ */
-let IMPAC = [], IMPAC_AVISOS = [], IMPAC_NOME = '';
+let IMPAC = [], IMPAC_AVISOS = [], IMPAC_NOME = '', IMPAC_BRUTO = [], IMPAC_RELATORIO = [];
 const catAcordoPadrao = () => {
   const c = (DB.SUBCLASSES||[]).find(x => String(x.ACORDO||'').toUpperCase() === 'SIM');
   return c ? c.NOME : (categorias('C')[0] || '');
@@ -2707,7 +2707,7 @@ async function excluirImportAcordos(chave){
     'os ' + g.lancs.length + ' acordo(s) da planilha "' + (g.arquivo.split(' · ')[0] || 'importada') + '", com parcelas, repasses e comissões');
 }
 function formImportarAcordos(){
-  IMPAC = []; IMPAC_AVISOS = []; IMPAC_NOME = '';
+  IMPAC = []; IMPAC_AVISOS = []; IMPAC_NOME = ''; IMPAC_BRUTO = []; IMPAC_RELATORIO = [];
   modal('Importar acordos',
     '<div class="campo"><label for="iacArq">Planilha (Excel ou CSV)</label>'
     + '<input type="file" id="iacArq" accept=".xlsx,.xls,.csv,.txt" onchange="lerArquivoAcordos(this)"></div>'
@@ -2722,6 +2722,7 @@ function formImportarAcordos(){
     + '<b>data primeira parcela</b>, <b>honorários sucumbência</b>, <b>advogado</b>, <b>praça</b> e <b>observações</b>. '
     + 'As colunas <b>% cliente</b> e <b>categoria</b> são opcionais — sem elas o sistema usa '
     + pctClientePadrao() + '% para o cliente e a categoria "' + esc(catAcordoPadrao() || '—') + '".</p>'
+    + '<input type="hidden" id="iacPular" value="">'
     + '<div id="iacPrevia"></div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
     + '<button class="btn" id="btnImpAc" disabled onclick="confirmarImportAcordos()">Importar acordos</button>', 'larga');
@@ -2798,32 +2799,71 @@ function parseTabelaAcordos(rows){
   return out;
 }
 function previaImportAcordos(linhas){
-  IMPAC = []; IMPAC_AVISOS = [];
+  if (linhas) IMPAC_BRUTO = linhas.map(l => Object.assign({}, l));
+  const pular = !!val('iacPular');
+  IMPAC = []; IMPAC_AVISOS = []; IMPAC_RELATORIO = [];
   const pastas = new Set((DB.LANCAMENTOS||[]).map(l => semAcento(l.PASTA) + '|' + rd(l.VALOR_TOTAL)));
-  let repetidos = 0;
-  linhas.forEach(l => {
+  let repetidos = 0, divergentes = 0;
+  const anotar = (l, situacao, acao) => IMPAC_RELATORIO.push({
+    pasta:l.pasta, cliente:l.cliente, data:l.dataAcordo, valorAcordo:l.valorAcordoOriginal != null ? l.valorAcordoOriginal : l.valorTotal,
+    qtd:l.qtd, valorParcela:l.valorParcela, soma:rd(n(l.valorParcela) * l.qtd),
+    sucumbencia:l.sucumbencia, situacao, acao});
+
+  IMPAC_BRUTO.map(l => Object.assign({}, l)).forEach(l => {
     const chave = semAcento(l.pasta) + '|' + rd(l.valorTotal);
-    if (l.pasta && pastas.has(chave)){ repetidos++; return; }
+    if (l.pasta && pastas.has(chave)){
+      repetidos++;
+      anotar(l, 'Já cadastrada no sistema', 'Ignorada');
+      return;
+    }
     pastas.add(chave);
     // a sucumbência é cobrada junto: as parcelas dividem o valor total do acordo
     if (l.sucumbencia > l.valorTotal){
       IMPAC_AVISOS.push('Pasta ' + (l.pasta||'—') + ': sucumbência de ' + moeda(l.sucumbencia)
         + ' maior que o acordo de ' + moeda(l.valorTotal) + ' — linha ignorada.');
+      anotar(l, 'Sucumbência maior que o acordo', 'Não importada');
       return;
     }
-    if (l.valorParcela && Math.abs(rd(l.valorParcela * l.qtd) - l.valorTotal) > 0.05)
-      IMPAC_AVISOS.push('Pasta ' + (l.pasta||'—') + ': ' + l.qtd + ' x ' + moeda(l.valorParcela)
-        + ' = ' + moeda(rd(l.valorParcela * l.qtd)) + ', mas o acordo é de ' + moeda(l.valorTotal)
-        + ' — a última parcela será ajustada para fechar.');
+    // quando a soma das parcelas discorda da coluna do acordo, vale a soma das parcelas:
+    // é ela que será recebida na conta e conciliada no extrato
+    if (l.valorParcela && l.qtd){
+      const soma = rd(l.valorParcela * l.qtd);
+      const p = 'Pasta ' + (l.pasta||'—') + ': ';
+      if (Math.abs(soma - l.valorTotal) > 0.05){
+        divergentes++;
+        l.valorAcordoOriginal = l.valorTotal;
+        const comSuc = Math.abs(soma - rd(l.valorTotal + l.sucumbencia)) <= 0.05;
+        const situacao = comSuc ? 'Acordo sem a sucumbência: ' + moeda(l.valorTotal) + ' + '
+                                  + moeda(l.sucumbencia) + ' = ' + moeda(soma)
+                                : l.qtd + ' x ' + moeda(l.valorParcela) + ' = ' + moeda(soma)
+                                  + ', acordo informado ' + moeda(l.valorTotal);
+        if (pular){
+          IMPAC_AVISOS.push(p + situacao + ' — não importada.');
+          anotar(l, situacao, 'Não importada');
+          return;
+        }
+        IMPAC_AVISOS.push(p + situacao + ' — lançada como ' + moeda(soma) + ', o valor das parcelas.');
+        anotar(l, situacao, 'Importada por ' + moeda(soma));
+        l.valorTotal = soma;
+      }
+    }
     IMPAC.push(l);
   });
 
   const total = IMPAC.reduce((s,l) => s + l.valorTotal, 0);
   $('#iacPrevia').innerHTML =
     '<div class="kpis" style="margin:14px 0 10px">'
-    + '<div class="kpi d"><div class="rot">Acordos novos</div><div class="val">'+IMPAC.length+'</div></div>'
+    + '<div class="kpi d"><div class="rot">Acordos a importar</div><div class="val">'+IMPAC.length+'</div></div>'
     + '<div class="kpi b"><div class="rot">Já cadastrados (ignorados)</div><div class="val">'+repetidos+'</div></div>'
+    + '<div class="kpi '+(divergentes?'n':'')+'"><div class="rot">Com divergência de cálculo</div><div class="val">'+divergentes+'</div></div>'
     + '<div class="kpi p"><div class="rot">Soma dos acordos</div><div class="val" style="font-size:17px">'+moeda(total)+'</div></div></div>'
+    + (IMPAC_RELATORIO.length
+        ? '<div class="seg" style="margin-bottom:12px">'
+          + '<button class="'+(pular?'on knao':'')+'" onclick="alternarPularDivergentes()">'
+          + (pular ? '✓ Divergências fora da importação' : 'Não importar as divergências') + '</button>'
+          + '<button onclick="exportarRelatorioAcordos()">Baixar relatório<span>'+IMPAC_RELATORIO.length+'</span></button>'
+          + '</div>'
+        : '')
     + (IMPAC_AVISOS.length ? '<div class="erro">' + IMPAC_AVISOS.slice(0,6).map(esc).join('<br>')
         + (IMPAC_AVISOS.length > 6 ? '<br>e mais ' + (IMPAC_AVISOS.length-6) + '…' : '') + '</div>' : '')
     + '<div class="tw" style="max-height:280px;overflow:auto"><table class="densa"><thead><tr>'
@@ -2843,6 +2883,24 @@ function previaImportAcordos(linhas){
       }).join('')
     + '</tbody></table></div>' + (IMPAC.length > 150 ? '<p class="mini">Mostrando os 150 primeiros.</p>' : '');
   $('#btnImpAc').disabled = IMPAC.length === 0;
+}
+function alternarPularDivergentes(){
+  const e = document.getElementById('iacPular');
+  if (e) e.value = e.value ? '' : '1';
+  previaImportAcordos();
+}
+function exportarRelatorioAcordos(){
+  if (!IMPAC_RELATORIO.length) return toast('Nada a relatar.','erro');
+  const cab = ['Pasta','Cliente','Data do acordo','Valor do acordo na planilha','Parcelas',
+               'Valor da parcela','Soma das parcelas','Sucumbência','Situação','O que o sistema fez'];
+  const linhas = IMPAC_RELATORIO.map(r => [r.pasta, r.cliente, dataBR(r.data), nMoeda(r.valorAcordo),
+    r.qtd, nMoeda(r.valorParcela), nMoeda(r.soma), nMoeda(r.sucumbencia), r.situacao, r.acao]);
+  const csv = [cab].concat(linhas)
+    .map(l => l.map(c => '"' + String(c == null ? '' : c).replace(/"/g,'""') + '"').join(';')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'}));
+  a.download = 'divergencias-acordos-' + hoje() + '.csv'; a.click(); URL.revokeObjectURL(a.href);
+  toast('Relatório gerado.','ok');
 }
 async function confirmarImportAcordos(){
   if (!IMPAC.length) return;
