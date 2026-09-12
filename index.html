@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.3';
+const VERSAO_APP = 'v4.4';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -1161,6 +1161,10 @@ function cfgGeral(){
     + '<p class="mini">Separe as categorias de folha por vírgula. O percentual é o quanto dos depósitos '
     + 'sem origem definida entra no resultado real.</p>'
     + '<div style="margin-top:14px"><button class="btn" onclick="gravarGeral()">Salvar configurações</button></div>'
+    + '<div class="secao-form" style="margin-top:22px">Manutenção da base</div>'
+    + '<p class="mini">Procura registros que perderam a origem — parcelas sem lançamento, repasses sem parcela, '
+    + 'comissões sem recebimento — e mostra um relatório antes de limpar.</p>'
+    + '<div style="margin-top:8px"><button class="btn sec" onclick="verificarOrfaos()">Verificar registros órfãos</button></div>'
     + '<div class="secao-form" style="margin-top:22px">Senha master</div>'
     + '<div class="grade">'
     + '<div class="campo"><label for="cgMaster">Nova senha do usuário master</label>'
@@ -4414,6 +4418,101 @@ function botaoDesfazerPago(c){
   const m = (DB.EXTRATO||[]).find(x => x.PARCELA_ID === c.ID && x.STATUS === 'Conciliado');
   return m ? '<button class="btn sm sec" onclick="desfazer(\''+m.ID+'\')">Desfazer baixa</button>'
            : '<span class="mini">—</span>';
+}
+
+/* ══════════════════ LIMPEZA DE REGISTROS ÓRFÃOS ══════════════════
+   Varre a base procurando registros que perderam a origem — parcelas
+   sem lançamento, repasses sem parcela, comissões sem recebimento e
+   movimentos conciliados contra registros que já não existem. */
+function planoOrfaos(){
+  const lancs = new Set((DB.LANCAMENTOS||[]).map(l => l.ID));
+  const crs = new Set((DB.CONTAS_RECEBER||[]).map(c => c.ID));
+
+  const parcOrfas = (DB.PARCELAS||[]).filter(p => !p.LANC_ID || !lancs.has(p.LANC_ID));
+  const orfas = new Set(parcOrfas.map(p => p.ID));
+  const parcVivas = new Set((DB.PARCELAS||[]).filter(p => !orfas.has(p.ID)).map(p => p.ID));
+  const alvoVivo = id => parcVivas.has(id) || crs.has(id);
+
+  const semOrigem = c => c.PARCELA_ID && !alvoVivo(c.PARCELA_ID);
+  const cpApagar = (DB.CONTAS_PAGAR||[]).filter(c => semOrigem(c) && c.STATUS !== 'Pago');
+  const cpSoltar = (DB.CONTAS_PAGAR||[]).filter(c => semOrigem(c) && c.STATUS === 'Pago');
+  const cpsRestantes = new Set((DB.CONTAS_PAGAR||[])
+    .filter(c => !cpApagar.some(x => x.ID === c.ID)).map(c => c.ID));
+
+  const comApagar = (DB.COMISSOES||[]).filter(c => semOrigem(c) && c.STATUS !== 'Paga');
+  const comSoltar = (DB.COMISSOES||[]).filter(c => semOrigem(c) && c.STATUS === 'Paga');
+
+  const movLiberar = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Conciliado' && m.PARCELA_ID
+    && !alvoVivo(m.PARCELA_ID) && !cpsRestantes.has(m.PARCELA_ID));
+
+  const crSoltar = (DB.CONTAS_RECEBER||[]).filter(c => c.CP_ID && !cpsRestantes.has(c.CP_ID));
+
+  const apagar = parcOrfas.map(p => ({aba:'PARCELAS', id:p.ID}))
+    .concat(cpApagar.map(c => ({aba:'CONTAS_PAGAR', id:c.ID})))
+    .concat(comApagar.map(c => ({aba:'COMISSOES', id:c.ID})));
+  const atualizar = movLiberar.map(m => ({aba:'EXTRATO',
+      registro: Object.assign({}, m, {STATUS:'Pendente', PARCELA_ID:''})}))
+    .concat(cpSoltar.map(c => ({aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {PARCELA_ID:'',
+      OBS:(c.OBS ? c.OBS + ' · ' : '') + 'origem não encontrada na limpeza de ' + dataBR(hoje())})})))
+    .concat(comSoltar.map(c => ({aba:'COMISSOES', registro: Object.assign({}, c, {PARCELA_ID:''})})))
+    .concat(crSoltar.map(c => ({aba:'CONTAS_RECEBER', registro: Object.assign({}, c, {CP_ID:''})})));
+
+  return {parcOrfas, cpApagar, cpSoltar, comApagar, comSoltar, movLiberar, crSoltar, apagar, atualizar};
+}
+
+function verificarOrfaos(){
+  const p = planoOrfaos();
+  const soma = arr => arr.reduce((s,x) => s + n(x.VALOR), 0);
+  const nada = !p.apagar.length && !p.atualizar.length;
+  const linha = (rot, qtd, valor, obs) => qtd
+    ? '<tr><td>'+esc(rot)+'</td><td class="num">'+qtd+'</td><td class="num">'+(valor != null ? nMoeda(valor) : '—')+'</td>'
+      + '<td class="mini">'+esc(obs)+'</td></tr>'
+    : '';
+  const corpo = nada
+    ? vazio('Nenhum registro órfão','A base está consistente: toda parcela tem lançamento e todo repasse tem origem.')
+    : '<div class="tw"><table class="densa"><thead><tr><th>O que foi encontrado</th><th class="num">Qtd.</th>'
+      + '<th class="num">Valor</th><th>O que será feito</th></tr></thead><tbody>'
+      + linha('Parcelas sem lançamento', p.parcOrfas.length, soma(p.parcOrfas), 'excluídas')
+      + linha('Repasses em aberto sem parcela', p.cpApagar.length, soma(p.cpApagar), 'excluídos')
+      + linha('Repasses já pagos sem parcela', p.cpSoltar.length, soma(p.cpSoltar), 'mantidos, só perdem o vínculo')
+      + linha('Comissões em aberto sem recebimento', p.comApagar.length, soma(p.comApagar), 'excluídas')
+      + linha('Comissões já pagas sem recebimento', p.comSoltar.length, soma(p.comSoltar), 'mantidas, só perdem o vínculo')
+      + linha('Movimentos conciliados sem destino', p.movLiberar.length, soma(p.movLiberar), 'voltam para a conciliação')
+      + linha('Recebimentos apontando repasse inexistente', p.crSoltar.length, null, 'vínculo limpo')
+      + '</tbody></table></div>'
+      + '<p class="mini" style="margin-top:10px">Nada que tenha dinheiro movimentado é apagado: repasses e comissões '
+      + 'já pagos são preservados e apenas perdem o vínculo quebrado. Os movimentos do extrato nunca são excluídos — '
+      + 'voltam para a fila de conciliação.</p>';
+  modal('Verificação de registros órfãos', corpo,
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + (nada ? '' : '<button class="btn per" onclick="executarLimpezaOrfaos()">Limpar '
+        + (p.apagar.length + p.atualizar.length) + ' registro(s)</button>'), 'larga');
+}
+
+async function executarLimpezaOrfaos(){
+  const p = planoOrfaos();
+  if (!p.apagar.length && !p.atualizar.length) return toast('Nada a limpar.','ok');
+  if (!confirm('Limpar ' + p.apagar.length + ' registro(s) órfão(s) e ajustar ' + p.atualizar.length
+    + ' vínculo(s)?\n\nEssa ação não pode ser desfeita.')) return;
+  fecharModal();
+  carregandoOn('Limpando a base…');
+  try{
+    for (let i = 0; i < p.atualizar.length; i += 200){
+      await salvarLote(p.atualizar.slice(i, i+200));
+    }
+    p.atualizar.forEach(it => {
+      const L = DB[it.aba] || [];
+      const j = L.findIndex(x => x.ID === it.registro.ID);
+      if (j >= 0) L[j] = it.registro;
+    });
+    for (let i = 0; i < p.apagar.length; i += 150){
+      carregandoOn('Limpando… ' + Math.min(i+150, p.apagar.length) + ' de ' + p.apagar.length);
+      await api({action:'excluirLote', lote: p.apagar.slice(i, i+150)});
+    }
+    p.apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
+    render();
+    toast(p.apagar.length + ' registro(s) órfão(s) removido(s).','ok');
+  }catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
 }
 
 </script>
