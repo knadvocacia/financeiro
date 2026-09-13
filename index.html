@@ -278,7 +278,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v5.3';
+const VERSAO_APP = 'v5.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -392,17 +392,45 @@ async function api(payload){
   if (escrita && !navigator.onLine){ NET.erro = 'sem conexão'; pintarNet(); throw new Error('Você está offline. Reconecte para salvar.'); }
   if (escrita){ NET.pendentes++; pintarNet(); }
   try{
-    const r = await fetch(API_URL, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify(payload) });
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.erro || 'Falha na comunicação com o servidor.');
-    if (escrita){ NET.erro = ''; NET.ultimo = agoraHM(); }
-    return j;
+    // Toda gravação é por ID (substitui a linha), então repetir o pedido é seguro.
+    // Duas tentativas resolvem a falha passageira em que o Google devolve
+    // uma página de erro no lugar dos dados.
+    let ultimoErro = null;
+    for (let tentativa = 1; tentativa <= 2; tentativa++){
+      try{
+        const r = await fetch(API_URL, { method:'POST',
+          headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify(payload) });
+        const txt = await r.text();
+        let j;
+        try{ j = JSON.parse(txt); }
+        catch(err){
+          throw new Error(/^\s*</.test(txt)
+            ? 'o Google devolveu uma página de erro em vez dos dados. Confira a implantação do Apps Script — em "Quem tem acesso" precisa estar "Qualquer pessoa".'
+            : 'resposta inesperada do servidor.');
+        }
+        if (!j.ok) throw new Error(j.erro || 'Falha na comunicação com o servidor.');
+        if (escrita){ NET.erro = ''; NET.ultimo = agoraHM(); }
+        return j;
+      }catch(e){
+        ultimoErro = e;
+        if (tentativa === 1) await new Promise(r2 => setTimeout(r2, 900));
+      }
+    }
+    throw ultimoErro;
   }catch(e){
     if (escrita) NET.erro = e.message || 'falha de rede';
     throw e;
   }finally{
     if (escrita){ NET.pendentes = Math.max(0, NET.pendentes - 1); pintarNet(); }
   }
+}
+/* busca uma aba inteira, quando a tela precisa do histórico completo */
+async function carregarAba(aba){
+  const j = await api({action:'carregarAba', aba});
+  DB[aba] = j.dados;
+  if (aba === 'EXTRATO') DB._extratoParcial = false;
+  invalidarIdx();
+  return j.dados;
 }
 async function salvar(aba, reg, silencio){
   // senha nova precisa ir pelo caminho antigo, para o servidor gerar o hash
@@ -500,8 +528,11 @@ async function carregar(avisar){
   await descarregarFila();          // nada pendente fica para trás
   carregandoOn('Carregando dados…');
   try{
-    const j = await api({action:'carregar'});
+    const j = await api({action:'carregar', dias: n(cfg('DIAS_EXTRATO','180')) || 180});
     DB = j.dados; DB._planilha = j.planilha; DB._pasta = j.pasta; DB._versao = j.versao;
+    DB._extratoParcial = !!j.dados._extratoParcial;
+    DB._extratoTotal = j.dados._extratoTotal;
+    DB._extratoCorte = j.dados._extratoCorte;
     invalidarIdx();
     $('#hdEscritorio').textContent = cfg('NOME_ESCRITORIO','Escritório de advocacia');
     const marca = document.getElementById('hdMarca');
@@ -1332,6 +1363,7 @@ function cfgGeral(){
     + inp('cgFolha','Categorias tratadas como folha no painel', cfg('CATEGORIAS_FOLHA','Folha, Audiencistas'), 'full')
     + inp('cgPctNI','% dos depósitos não identificados no resultado real', cfg('PCT_NAO_IDENT','30'))
     + inp('cgPctCli','% padrão do cliente nos acordos', cfg('PCT_CLIENTE_PADRAO','70'))
+    + inp('cgDias','Dias de extrato carregados na abertura', cfg('DIAS_EXTRATO','180'))
     + '</div>'
     + '<p class="mini">Separe as categorias de folha por vírgula. O percentual é o quanto dos depósitos '
     + 'sem origem definida entra no resultado real.</p>'
@@ -1378,7 +1410,8 @@ async function gravarGeral(){
                     {aba:'CONFIG', registro:{...b, VALOR:val('cgTarifa')}},
                     {aba:'CONFIG', registro:{...c, VALOR:val('cgFolha')}},
                     {aba:'CONFIG', registro:{...d, VALOR:val('cgPctNI')}},
-                    {aba:'CONFIG', registro:{...acha('PCT_CLIENTE_PADRAO'), VALOR:val('cgPctCli')}}]);
+                    {aba:'CONFIG', registro:{...acha('PCT_CLIENTE_PADRAO'), VALOR:val('cgPctCli')}},
+                    {aba:'CONFIG', registro:{...acha('DIAS_EXTRATO'), VALOR:val('cgDias')}}]);
   $('#hdEscritorio').textContent = val('cgNome') || 'Escritório de advocacia';
   toast('Configurações salvas.','ok'); abrirConfig('geral');
 }
@@ -1546,11 +1579,11 @@ function montarCPC(){
     const ant = existentes[i];
     if (ant){
       const esc2 = n(ant.ESC_PREV != null ? ant.ESC_PREV : ant.ESC);
-      PARC_TMP.push({ID:ant.ID || '', VENCIMENTO:ant.VENCIMENTO, CLI:rd(n(ant.VALOR) - esc2),
-                     ESC:esc2, ATIVA:true, STATUS:ant.STATUS || 'A receber'});
+      PARC_TMP.push({ID:ant.ID || '', NUM:n(ant.NUM) || (i+1), VENCIMENTO:ant.VENCIMENTO,
+                     CLI:rd(n(ant.VALOR) - esc2), ESC:esc2, ATIVA:true, STATUS:ant.STATUS || 'A receber'});
     } else {
       const d = new Date(base + 'T12:00'); d.setMonth(d.getMonth() + i);
-      PARC_TMP.push({ID:'', VENCIMENTO:d.toISOString().slice(0,10), CLI:0, ESC:0,
+      PARC_TMP.push({ID:'', NUM:i+1, VENCIMENTO:d.toISOString().slice(0,10), CLI:0, ESC:0,
                      ATIVA:i < existentes.length, STATUS:'A receber'});
     }
   }
@@ -1572,7 +1605,9 @@ function pintarCPC(box){
     + 'oninput="PARC_TMP['+i+'].'+campo+'=n(this.value)" onblur="pintarParcelas()" '
     + 'style="width:110px;text-align:right;padding:4px 6px;border:1px solid var(--line);border-radius:4px;'
     + 'font-family:\'IBM Plex Mono\',monospace">';
-  box.innerHTML = '<div class="tw"><table><thead><tr><th style="width:34px"></th><th>Parcela</th><th>Vencimento</th>'
+  const nums = PARC_TMP.filter(p => p.ATIVA).map(p => n(p.NUM));
+  const repetido = nums.some((v,i) => nums.indexOf(v) !== i);
+  box.innerHTML = '<div class="tw"><table><thead><tr><th style="width:34px"></th><th>Parcela nº</th><th>Vencimento</th>'
     + '<th class="num">Valor cliente</th><th class="num">Valor escritório</th><th class="num">Total</th><th>Situação</th></tr></thead><tbody>'
     + PARC_TMP.map((p,i) => {
         const total = rd(n(p.CLI) + n(p.ESC));
@@ -1580,7 +1615,9 @@ function pintarCPC(box){
           + '<td><button class="btn sm '+(p.ATIVA ? 'per' : 'sec')+'" title="'
           + (p.ATIVA ? 'Desconsiderar esta parcela' : 'Voltar a considerar esta parcela')
           + '" onclick="alternarParcelaCPC('+i+')">'+(p.ATIVA ? '✕' : '↺')+'</button></td>'
-          + '<td><b>Parcela '+(i+1)+'</b></td>'
+          + '<td><input type="number" min="1" value="'+n(p.NUM)+'" '+(p.STATUS==='Recebida'?'disabled':'')
+            + ' oninput="PARC_TMP['+i+'].NUM=n(this.value)" onblur="pintarParcelas()"'
+            + ' style="width:62px;padding:4px 6px;border:1px solid var(--line);border-radius:4px;font-weight:600"></td>'
           + '<td><input type="date" value="'+esc(p.VENCIMENTO)+'" '+(p.STATUS==='Recebida'?'disabled':'')
             + ' onchange="PARC_TMP['+i+'].VENCIMENTO=this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:4px"></td>'
           + '<td class="num">'+cel(i,'CLI',p.CLI)+'</td>'
@@ -1593,8 +1630,10 @@ function pintarCPC(box){
     + '</tbody><tfoot><tr><th colspan="3" style="text-align:right">Totais das '+ativas.length+' parcela(s) consideradas</th>'
     + '<th class="num">'+nMoeda(somaCli)+'</th><th class="num">'+nMoeda(somaEsc)+'</th>'
     + '<th class="num">'+nMoeda(rd(somaCli+somaEsc))+'</th><th></th></tr></tfoot></table></div>'
+    + (repetido ? '<div class="erro" style="margin-top:6px">Há números de parcela repetidos entre as consideradas. Ajuste antes de salvar.</div>' : '')
     + '<p class="mini" style="margin-top:6px">Acordo CPC: os valores do cliente e do escritório são digitados em cada parcela, '
-    + 'sem percentual. O ✕ desconsidera a parcela, e o ↺ traz de volta. '
+    + 'sem percentual. O número da parcela é editável — dá para lançar só as parcelas 3, 4 e 5, por exemplo. '
+    + 'O ✕ desconsidera a parcela, e o ↺ traz de volta. '
     + (tarifa ? 'A tarifa de '+moeda(tarifa)+' ainda sai do cliente e vai para o escritório em cada parcela.' : '')
     + '</p>';
 }
@@ -1634,8 +1673,13 @@ async function gravarLanc(id, opcoes){
   const cpc = catCPC(val('lcSub'));
   if (cpc){
     PARC_TMP = PARC_TMP.filter(p => p.ATIVA && rd(n(p.CLI) + n(p.ESC)) > 0)
-      .map(p => Object.assign({}, p, {VALOR: rd(n(p.CLI) + n(p.ESC))}));
+      .map(p => Object.assign({}, p, {VALOR: rd(n(p.CLI) + n(p.ESC))}))
+      .sort((a,b) => n(a.NUM) - n(b.NUM));
     if (!PARC_TMP.length) return toast('Informe o valor de ao menos uma parcela.','erro');
+    const numeros = PARC_TMP.map(p => n(p.NUM));
+    if (numeros.some(v => v < 1)) return toast('O número da parcela precisa ser 1 ou mais.','erro');
+    if (numeros.some((v,i) => numeros.indexOf(v) !== i))
+      return toast('Há números de parcela repetidos. Ajuste antes de salvar.','erro');
   }
   if (!PARC_TMP.length) return toast('Gere ao menos uma parcela.','erro');
   const somaT = rd(PARC_TMP.reduce((s,p) => s + n(p.VALOR), 0));
@@ -1671,7 +1715,7 @@ async function gravarLanc(id, opcoes){
                   || (DB.CONTAS_PAGAR||[]).find(c => c.PARCELA_ID === parcId && c.CATEGORIA === 'Repasse a cliente');
     const cpId = vCli > 0 ? (cpAntigo ? cpAntigo.ID : uid('cp')) : '';
     lote.push({aba:'PARCELAS', registro: Object.assign({}, antiga || {}, {
-      ID: parcId, LANC_ID: lanc.ID, TIPO:'Parcela', NUM: i+1,
+      ID: parcId, LANC_ID: lanc.ID, TIPO:'Parcela', NUM: cpc ? n(p.NUM) : (i+1),
       VENCIMENTO: p.VENCIMENTO, VALOR: rd(p.VALOR), STATUS:'A receber',
       DATA_CREDITO:'', VALOR_CREDITADO:'', MOV_ID:'', VALOR_CLIENTE:'', VALOR_ESCRITORIO:'', TARIFA:'',
       CP_ID: cpId, OBS:'', SUCUMBENCIA: cpc ? '' : (sucs[i] || ''), ESC_PREV: cpc ? escP : ''
@@ -1679,7 +1723,8 @@ async function gravarLanc(id, opcoes){
     // repasse ao cliente já entra em contas a pagar, bloqueado até a conciliação
     if (vCli > 0){
       lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cpAntigo || {}, {
-        ID: cpId, DESCRICAO:'Repasse ao cliente — pasta '+(lanc.PASTA||'—')+' · parcela '+(i+1)+'/'+PARC_TMP.length,
+        ID: cpId, DESCRICAO:'Repasse ao cliente — pasta '+(lanc.PASTA||'—')
+          + ' · parcela '+(cpc ? n(p.NUM) : (i+1))+(cpc ? '' : '/'+PARC_TMP.length),
         FAVORECIDO: lanc.CLIENTE || '', CATEGORIA:'Repasse a cliente', VENCIMENTO: p.VENCIMENTO, VALOR: vCli,
         STATUS: (cpAntigo && cpAntigo.STATUS) || 'Em aberto', DATA_PGTO: (cpAntigo && cpAntigo.DATA_PGTO) || '',
         ORIGEM:'Repasse de parcela', PARCELA_ID: parcId, ANEXO_URL:'',
@@ -1959,7 +2004,6 @@ function telaConciliacao(){
   const pend = M.filter(m => m.STATUS === 'Pendente');
   const naoId = M.filter(m => m.STATUS === 'Nao identificado');
   const conc = M.filter(m => m.STATUS === 'Conciliado');
-  const dup = duplicidades(M);
 
   const topo = cabec('Conciliação bancária',
       'Recebimentos e pagamentos só se efetivam aqui. Nada é baixado manualmente.',
@@ -1980,24 +2024,14 @@ function telaConciliacao(){
           + '<button class="btn sm sec" onclick="irPara(\'recebidas\',\'naoid\')">Abrir</button></div></div>'
         : '')
     + subtabs([['pendentes','Pendentes ('+pend.length+')'],
-               ['conciliados','Conciliados ('+conc.length+')'],
-               ['divergencias','Duplicidades e divergências ('+dup.length+')']]);
+               ['conciliados','Conciliados ('+conc.length+')']])
+    + (sub === 'pendentes' ? '' : avisoExtratoParcial());
 
-  if (sub === 'pendentes') return topo + listaPendentes(pend);
   if (sub === 'conciliados') return topo + listaConciliados(conc);
-  return topo + listaDivergencias(dup);
+  return topo + listaPendentes(pend);
 }
 function kpi(rot, val, sub, cls){
   return '<div class="kpi '+(cls||'d')+'"><div class="rot">'+esc(rot)+'</div><div class="val">'+esc(String(val))+'</div><div class="sub">'+esc(sub||'')+'</div></div>';
-}
-function duplicidades(M){
-  const mapa = {}, out = [];
-  M.forEach(m => {
-    const k = (m.BANCO||'') + '|' + m.DATA + '|' + rd(m.VALOR) + '|' + String(m.IDENTIFICACAO||'').slice(0,40).toUpperCase();
-    (mapa[k] = mapa[k] || []).push(m);
-  });
-  Object.values(mapa).forEach(g => { if (g.length > 1) out.push(...g); });
-  return out;
 }
 function linhaMov(m, extra){
   return '<td>'+dataBR(m.DATA)+'</td><td>'+esc(m.IDENTIFICACAO||'—')
@@ -2035,6 +2069,8 @@ function ladoMovimento(m, extras){
     + '<span class="valor '+(ehDebito(m)?'neg':'pos')+'">'+moeda(m.VALOR)+'</span>'
     + '<span class="mini">'+dataBR(m.DATA)+(m.BANCO?' · '+esc(m.BANCO):'')+'</span></div>'
     + '<div class="hist" title="'+esc(m.IDENTIFICACAO||'')+'">'+esc(m.IDENTIFICACAO||'—')+'</div>'
+    + (m.STATUS === 'Nao identificado' && m.OBS
+        ? '<div class="mini" style="margin-top:3px;color:var(--brass)">'+esc(m.OBS)+'</div>' : '')
     + '<div class="acoes">'
     + '<button class="btn sm sec" onclick="escolherManual(\''+m.ID+'\')">Vincular</button>'
     + '<button class="btn sm sec" onclick="formVincularVarios(\''+m.ID+'\')">Vincular vários</button>'
@@ -2049,6 +2085,7 @@ function listaNaoIdentificados(L){
   return L.sort((a,b) => String(a.DATA).localeCompare(String(b.DATA))).map(m =>
     '<div class="card fino"><div class="corpo conc">'
     + ladoMovimento(m, '<button class="btn sm sec" onclick="voltarPendente(\''+m.ID+'\')">Voltar para pendentes</button>'
+                     + '<button class="btn sm sec" onclick="formObsMov(\''+m.ID+'\')">Observações</button>'
                      + '<button class="btn sm per" onclick="excluirMov(\''+m.ID+'\')">Excluir</button>')
     + '<div class="sugs"><p class="mini" style="margin-bottom:5px">'
     + (ehDebito(m) ? 'Contas a pagar em aberto com o mesmo valor:'
@@ -2120,22 +2157,6 @@ function listaConciliados(L){
 function limparFiltrosConc(){
   ['cnDe','cnAte','cnMin','cnMax','busca'].forEach(k => delete FILTROS[k]);
   render();
-}
-function listaDivergencias(dup){
-  const semValor = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Pendente' && !sugestoes(m).some(s => s.score >= 50));
-  return '<div class="card"><h3>Possíveis duplicidades</h3>'
-    + (dup.length ? '<div class="tw"><table><thead><tr><th>Data</th><th>Identificação</th><th class="num">Valor</th><th>Situação</th><th></th></tr></thead><tbody>'
-      + dup.sort((a,b)=>String(a.DATA).localeCompare(String(b.DATA))).map(m => '<tr class="grifo">' + linhaMov(m)
-        + '<td><span class="tag t-pend">'+esc(m.STATUS)+'</span></td>'
-        + '<td style="text-align:right"><button class="btn sm per" onclick="excluirMov(\''+m.ID+'\')">Excluir</button></td></tr>').join('')
-      + '</tbody></table></div>' : vazio('Sem duplicidades','Nenhum movimento repetido com mesma data, valor e descrição.'))
-    + '</div><div class="card"><h3>Sem correspondência exata de valor</h3>'
-    + (semValor.length ? '<div class="tw"><table><thead><tr><th>Data</th><th>Identificação</th><th class="num">Valor</th><th>Melhor sugestão</th></tr></thead><tbody>'
-      + semValor.map(m => { const s = sugestoes(m)[0];
-        return '<tr>' + linhaMov(m) + '<td>' + (s ? esc(s.c.titulo) + ' — ' + moeda(s.c.valor) + ' <span class="mini">(dif. '
-          + moeda(Math.abs(s.c.valor - Math.abs(n(m.VALOR)))) + ')</span>' : '<span class="mini">nenhuma</span>') + '</td></tr>'; }).join('')
-      + '</tbody></table></div>' : vazio('Sem divergências','Todos os movimentos pendentes têm registro de valor idêntico.'))
-    + '</div>';
 }
 
 /* ── Conciliar ── */
@@ -2403,12 +2424,41 @@ async function desfazer(movId){
 
 
 
-async function marcarNaoIdentificado(id){
+function marcarNaoIdentificado(id){
   const m = (DB.EXTRATO||[]).find(x => x.ID === id); if (!m) return;
-  try{
-    await salvarLoteRapido([{aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Nao identificado'})}]);
-    toast('Movido para depósitos não identificados, em contas recebidas.','ok');
-  }catch(e){}
+  modal('Depósito não identificado',
+    '<p class="mini" style="margin-bottom:12px">Movimento de <b>'+moeda(m.VALOR)+'</b> em '+dataBR(m.DATA)
+    + (m.BANCO ? ' · '+esc(m.BANCO) : '') + ' — '+esc(m.IDENTIFICACAO||'')+'</p>'
+    + '<div class="campo"><label for="niObs">Observações</label>'
+    + '<textarea id="niObs" rows="3" placeholder="o que se sabe sobre esse depósito, quem pode ter enviado, o que falta conferir…">'
+    + esc(m.OBS||'') + '</textarea></div>'
+    + '<p class="mini">A observação fica junto do depósito na lista, em contas recebidas.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn" onclick="gravarNaoIdentificado(\''+id+'\')">Marcar como não identificado</button>', 'estreita');
+}
+function gravarNaoIdentificado(id){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === id); if (!m) return;
+  const obs = val('niObs');
+  fecharModal();
+  salvarLoteRapido([{aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Nao identificado', OBS:obs})}]);
+  toast('Movido para depósitos não identificados, em contas recebidas.','ok');
+}
+/* edita só a observação de um depósito já marcado */
+function formObsMov(id){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === id); if (!m) return;
+  modal('Observações do depósito',
+    '<p class="mini" style="margin-bottom:12px">'+moeda(m.VALOR)+' em '+dataBR(m.DATA)+' — '+esc(m.IDENTIFICACAO||'')+'</p>'
+    + '<div class="campo"><label for="niObs">Observações</label>'
+    + '<textarea id="niObs" rows="3">'+esc(m.OBS||'')+'</textarea></div>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn" onclick="gravarObsMov(\''+id+'\')">Salvar</button>', 'estreita');
+}
+function gravarObsMov(id){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === id); if (!m) return;
+  const obs = val('niObs');
+  fecharModal();
+  salvarLoteRapido([{aba:'EXTRATO', registro: Object.assign({}, m, {OBS:obs})}]);
+  toast('Observação salva.','ok');
 }
 async function voltarPendente(id){
   const m = (DB.EXTRATO||[]).find(x => x.ID === id); if (!m) return;
@@ -3146,7 +3196,7 @@ async function excluirImportAcordos(chave){
 }
 async function formImportarAcordos(){
   IMPAC = []; IMPAC_AVISOS = []; IMPAC_NOME = ''; IMPAC_BRUTO = []; IMPAC_RELATORIO = [];
-  await carregar();   // evita comparar com acordos que já foram excluídos nesta ou em outra sessão
+  try{ await carregarAba('LANCAMENTOS'); }catch(e){}   // confere com o que existe agora, sem recarregar a base toda
   modal('Importar acordos',
     '<div class="campo"><label for="iacArq">Planilha (Excel ou CSV)</label>'
     + '<input type="file" id="iacArq" accept=".xlsx,.xls,.csv,.txt" onchange="lerArquivoAcordos(this)"></div>'
@@ -4840,6 +4890,7 @@ function telaContaCorrente(){
   return cabec('Conta corrente', 'Extrato dos movimentos já conciliados, do mais recente para o mais antigo.',
       '<button class="btn sec" onclick="limparFiltrosCC()">Limpar filtros</button>'
     + '<button class="btn sec" onclick="exportarCSV(\'conta-corrente\')">Exportar CSV</button>')
+    + avisoExtratoParcial()
     + '<div class="kpis">'
     + kpi('Entradas', moeda(cred), L.filter(r => !ehDebito(r.m)).length + ' crédito(s)', 'p')
     + kpi('Saídas', moeda(deb), L.filter(r => ehDebito(r.m)).length + ' débito(s)', 'n')
@@ -4871,6 +4922,21 @@ function telaContaCorrente(){
       : '<tr><td colspan="8">'+vazio('Nenhum movimento conciliado','Concilie os créditos e débitos do extrato para vê-los aqui.')+'</td></tr>')
     + '</tbody></table></div></div>'
     + '<p class="mini">O saldo acumulado soma apenas os movimentos conciliados dentro do filtro — não é o saldo da conta no banco.</p>';
+}
+/* avisa quando só os movimentos recentes foram carregados */
+function avisoExtratoParcial(){
+  if (!DB._extratoParcial) return '';
+  return '<div class="card" style="border-left:3px solid var(--brass)"><div class="corpo">'
+    + '<b>Mostrando os movimentos a partir de ' + dataBR(DB._extratoCorte) + '.</b> '
+    + '<span class="mini">Para abrir mais rápido, o sistema carrega só os últimos meses e tudo o que '
+    + 'ainda está pendente. O extrato completo tem ' + (DB._extratoTotal || '—') + ' movimentos.</span> '
+    + '<button class="btn sm sec" onclick="trazerExtratoCompleto()">Carregar todo o histórico</button>'
+    + '</div></div>';
+}
+async function trazerExtratoCompleto(){
+  carregandoOn('Buscando o histórico completo…');
+  try{ await carregarAba('EXTRATO'); render(); toast('Histórico completo carregado.','ok'); }
+  catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
 }
 function limparFiltrosCC(){
   ['ccConta','ccDe','ccAte','ccMin','ccMax','ccTipo','busca'].forEach(k => delete FILTROS[k]);
