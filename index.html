@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.7';
+const VERSAO_APP = 'v4.8';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -604,11 +604,13 @@ let CFGABA = 'contas';
 function abrirConfig(aba){
   if (!podeVer('config')) return toast('Seu usuário não tem acesso às configurações.','erro');
   CFGABA = aba || CFGABA;
-  const abas = [['contas','Contas bancárias'],['favorecidos','Favorecidos'],['pracas','Praças'],['subclasses','Categorias'],['usuarios','Usuários'],
+  const abas = [['contas','Contas bancárias'],['favorecidos','Favorecidos'],['pracas','Praças'],
+                ['subclasses','Categorias'],['subcats','Subcategorias'],['usuarios','Usuários'],
                 ['regras','Regras de comissão'],['geral','Geral']];
   const menu = '<div class="subtabs">' + abas.map(([k,t]) =>
     '<button class="'+(CFGABA===k?'on':'')+'" onclick="abrirConfig(\''+k+'\')">'+t+'</button>').join('') + '</div>';
-  const corpo = { contas:cfgContas, favorecidos:cfgFavorecidos, pracas:cfgPracas, usuarios:cfgUsuarios, subclasses:cfgSubclasses,
+  const corpo = { contas:cfgContas, favorecidos:cfgFavorecidos, pracas:cfgPracas, usuarios:cfgUsuarios,
+                  subclasses:cfgSubclasses, subcats:cfgSubcats,
                   comissionados:cfgRegras, regras:cfgRegras, geral:cfgGeral }[CFGABA]();
   modal('Configurações', menu + corpo, '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
 }
@@ -728,6 +730,78 @@ function optsFavorecidos(){
   return (DB.FAVORECIDOS||[]).filter(f => f.ATIVO !== 'NAO')
     .slice().sort((a,b) => String(a.NOME).localeCompare(String(b.NOME),'pt-BR'))
     .map(f => '<option value="'+esc(f.NOME)+'">'+(f.DOC ? esc(f.DOC) : '')+'</option>').join('');
+}
+
+/* Subcategorias — um segundo nível dentro de uma categoria */
+const subcatsDe = categoria => (DB.SUBCATEGORIAS||[])
+  .filter(s => s.CATEGORIA === categoria && s.ATIVO !== 'NAO')
+  .map(s => s.NOME)
+  .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
+
+function cfgSubcats(){
+  const cats = categorias('C').concat(categorias('D'));
+  const L = (DB.SUBCATEGORIAS||[]).slice()
+    .sort((a,b) => String(a.CATEGORIA).localeCompare(String(b.CATEGORIA),'pt-BR')
+                || String(a.NOME).localeCompare(String(b.NOME),'pt-BR'));
+  const linhas = L.length ? L.map(s =>
+    '<tr><td>'+esc(s.CATEGORIA)+'</td><td><b>'+esc(s.NOME)+'</b></td>'
+    + '<td style="text-align:right;white-space:nowrap">'
+    + '<button class="btn sm sec" onclick="formSubcat(\''+s.ID+'\')">Editar</button> '
+    + '<button class="btn sm per" onclick="apagarReg(\'SUBCATEGORIAS\',\''+s.ID+'\',\''+esc(s.NOME)+'\',\'subcats\')">Excluir</button></td></tr>').join('')
+    : '<tr><td colspan="3" class="vazio">Nenhuma subcategoria. Elas aparecem para escolher assim que a categoria correspondente for selecionada num lançamento.</td></tr>';
+  return (cats.length
+    ? '<div class="grade" style="margin-bottom:12px;align-items:end">'
+      + sel('novaSubcatCat','Categoria', cats.map(c => [c,c]), FILTROS.ultCatSubcat || '')
+      + '<div class="campo" style="flex:1;min-width:180px"><label for="novaSubcatNome">Nova subcategoria</label>'
+        + '<input id="novaSubcatNome" placeholder="Ex.: Honorários de parecer"></div>'
+      + '<div><button class="btn" onclick="addSubcat()">Adicionar</button></div></div>'
+    : '<p class="mini" style="margin-bottom:12px">Cadastre categorias antes de criar subcategorias.</p>')
+    + tabelaSimples([{t:'Categoria'},{t:'Subcategoria'},{t:''}], linhas);
+}
+async function addSubcat(){
+  const cat = val('novaSubcatCat'), nome = tit(val('novaSubcatNome'));
+  if (!cat || !nome) return toast('Escolha a categoria e informe o nome da subcategoria.','erro');
+  if ((DB.SUBCATEGORIAS||[]).some(s => s.CATEGORIA === cat && s.NOME.toLowerCase() === nome.toLowerCase()))
+    return toast('Essa subcategoria já existe nesta categoria.','erro');
+  FILTROS.ultCatSubcat = cat;
+  await salvar('SUBCATEGORIAS', {ID:'', CATEGORIA:cat, NOME:nome, ATIVO:'SIM'});
+  abrirConfig('subcats');
+}
+function formSubcat(id){
+  const s = (DB.SUBCATEGORIAS||[]).find(x => x.ID === id) || {};
+  const cats = categorias('C').concat(categorias('D'));
+  modal('Editar subcategoria',
+    '<div class="grade">'
+    + sel('scCat','Categoria', cats.map(c => [c,c]), s.CATEGORIA)
+    + inp('scNome','Nome da subcategoria', s.NOME)
+    + '<div class="campo"><label for="scAtivo">Situação</label><select id="scAtivo">'
+      + '<option value="SIM">Ativa</option><option value="NAO"'+(s.ATIVO==='NAO'?' selected':'')+'>Inativa</option></select></div>'
+    + '</div>',
+    '<button class="btn sec" onclick="abrirConfig(\'subcats\')">Cancelar</button>'
+    + '<button class="btn" onclick="gravarSubcat(\''+id+'\',\''+esc(s.NOME||'')+'\')">Salvar</button>', 'estreita');
+}
+async function gravarSubcat(id, antigo){
+  const nome = tit(val('scNome'));
+  if (!nome) return toast('Informe o nome da subcategoria.','erro');
+  const lote = [{aba:'SUBCATEGORIAS', registro:{ID:id, CATEGORIA:val('scCat'), NOME:nome, ATIVO:val('scAtivo')}}];
+  if (antigo && antigo !== nome){
+    (DB.CONTAS_RECEBER||[]).filter(c => c.SUBCATEGORIA === antigo).forEach(c =>
+      lote.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, c, {SUBCATEGORIA:nome})}));
+    (DB.CONTAS_PAGAR||[]).filter(c => c.SUBCATEGORIA === antigo).forEach(c =>
+      lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {SUBCATEGORIA:nome})}));
+  }
+  carregandoOn('Salvando…');
+  try{ await salvarLote(lote); abrirConfig('subcats'); render(); toast('Subcategoria salva.','ok'); }
+  catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
+}
+/* seletor de subcategoria, montado conforme a categoria escolhida */
+function montaSubcat(idCat, idBox, idSel, atual){
+  const box = document.getElementById(idBox); if (!box) return;
+  const L = subcatsDe(val(idCat));
+  if (atual && L.indexOf(atual) < 0) L.push(atual);
+  box.innerHTML = L.length
+    ? sel(idSel, 'Subcategoria', [['','— selecione —']].concat(L.map(x => [x,x])), atual || '')
+    : '';
 }
 
 /* Contas bancárias */
@@ -2151,7 +2225,8 @@ function formNovoNaConciliacao(movId){
           + '<datalist id="dlFav">'+optsFavorecidos()+'</datalist></div>'
         : inp('ncQuem','Cliente', '', '', 'text', 'oninput="sincronizaFavorecido()"'))
     + sel('ncCat','Categoria', opcoesCategorias(deb ? 'D' : 'C', '', '— selecione —'), '', '',
-        deb ? 'onchange="this.dataset.tocado=1"' : 'onchange="montaRateio()"')
+        'onchange="mudouCategoriaNC(' + (deb ? 'true' : 'false') + ')"')
+    + '<div class="campo" id="boxSubcatNC" style="padding:0;margin:0"></div>'
     + inp('ncVenc', deb ? 'Vencimento' : 'Data', m.DATA, '', 'date')
     + inp('ncValor','Valor (R$)', valor, '', 'text', deb ? '' : 'oninput="montaRateio()"')
     + (deb ? '' :
@@ -2166,6 +2241,13 @@ function formNovoNaConciliacao(movId){
   modal(deb ? 'Nova conta a pagar a partir do extrato' : 'Novo recebimento a partir do extrato', corpo,
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
     + '<button class="btn ok" onclick="gravarNovoNaConciliacao(\''+movId+'\')">Salvar e conciliar</button>');
+}
+/* categoria mudou: refaz o seletor de subcategoria e o bloco de rateio ou acordo */
+function mudouCategoriaNC(deb){
+  const c = document.getElementById('ncCat');
+  if (deb && c) c.dataset.tocado = 1;
+  montaSubcat('ncCat', 'boxSubcatNC', 'ncSubcat', '');
+  if (!deb) montaRateio();
 }
 /* mostra os campos de rateio quando a categoria escolhida divide com o cliente */
 function montaRateio(){
@@ -2307,8 +2389,9 @@ async function gravarNovoNaConciliacao(movId){
     const fav = garantirFavorecido(tit(val('ncQuem')), val('ncCat'));
     if (fav) lote.push(fav);
     lote.push({aba:'CONTAS_PAGAR', registro:{ID:id, DESCRICAO:tit(val('ncDesc')), FAVORECIDO:tit(val('ncQuem')),
-      CATEGORIA:val('ncCat'), VENCIMENTO:val('ncVenc'), VALOR:valor, STATUS:'Em aberto', DATA_PGTO:'',
-      ORIGEM:'Lançado na conciliação', PARCELA_ID:'', ANEXO_URL:'', OBS:val('ncObs')}});
+      CATEGORIA:val('ncCat'), SUBCATEGORIA:val('ncSubcat'), VENCIMENTO:val('ncVenc'), VALOR:valor,
+      STATUS:'Em aberto', DATA_PGTO:'', ORIGEM:'Lançado na conciliação', PARCELA_ID:'', ANEXO_URL:'',
+      OBS:val('ncObs'), SEM_DADOS:''}});
   } else if (catAcordo(val('ncCat'))){
     espelharCamposAcordo();
     const lanc = await gravarLanc('', {semFechar:true});
@@ -2349,7 +2432,8 @@ async function gravarNovoNaConciliacao(movId){
              + obsRepasse(dadosCR, valor, esc, cli, tar, m.DATA)}});
     }
     lote.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, dadosCR, {ID:id,
-      CATEGORIA:val('ncCat'), VENCIMENTO:val('ncVenc'), VALOR:valor, STATUS:'Em aberto', DATA_RECEB:'',
+      CATEGORIA:val('ncCat'), SUBCATEGORIA:val('ncSubcat'),
+      VENCIMENTO:val('ncVenc'), VALOR:valor, STATUS:'Em aberto', DATA_RECEB:'',
       ORIGEM:'Lançado na conciliação', ANEXO_URL:'', OBS:val('ncObs'),
       VALOR_ESCRITORIO:esc, VALOR_CLIENTE:cli, CP_ID:cpId, TARIFA:tar})});
   }
@@ -3279,17 +3363,20 @@ function formCR(id){
   if (c.STATUS === 'Recebido') return toast('Esta conta já foi recebida. Desfaça a conciliação para alterá-la.','erro');
   modal(id ? 'Editar conta a receber' : 'Nova conta a receber',
     '<div class="grade">' + inp('crDesc','Descrição', c.DESCRICAO, 'full') + inp('crCliente','Cliente', c.CLIENTE)
-    + sel('crCat','Categoria (crédito)', opcoesCategorias('C', c.CATEGORIA, '— selecione —'), c.CATEGORIA)
+    + sel('crCat','Categoria (crédito)', opcoesCategorias('C', c.CATEGORIA, '— selecione —'), c.CATEGORIA, '',
+        'onchange="montaSubcat(\'crCat\',\'boxSubcatCR\',\'crSubcat\',\'\')"')
+    + '<div class="campo" id="boxSubcatCR" style="padding:0;margin:0"></div>'
     + inp('crVenc','Vencimento', c.VENCIMENTO || hoje(),'','date')
     + inp('crValor','Valor (R$)', c.VALOR ? nMoeda(c.VALOR) : '') + '</div>'
     + '<p class="mini" style="margin-top:8px">O recebimento é dado como baixado apenas quando o crédito for conciliado no extrato.</p>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" onclick="gravarCR(\''+(id||'')+'\')">Salvar</button>','estreita');
+  montaSubcat('crCat', 'boxSubcatCR', 'crSubcat', c.SUBCATEGORIA);
 }
 async function gravarCR(id){
   if (!val('crDesc') || !n(val('crValor'))) return toast('Informe descrição e valor.','erro');
   const atual = (DB.CONTAS_RECEBER||[]).find(x => x.ID === id) || {};
   await salvar('CONTAS_RECEBER', Object.assign({}, atual, {ID:id||'', DESCRICAO:tit(val('crDesc')), CLIENTE:tit(val('crCliente')),
-    CATEGORIA:val('crCat'), VENCIMENTO:val('crVenc'), VALOR:rd(n(val('crValor'))),
+    CATEGORIA:val('crCat'), SUBCATEGORIA:val('crSubcat'), VENCIMENTO:val('crVenc'), VALOR:rd(n(val('crValor'))),
     STATUS: atual.STATUS || 'Em aberto', DATA_RECEB: atual.DATA_RECEB || '', ORIGEM: atual.ORIGEM || 'Manual'}));
   fecharModal(); render();
 }
@@ -3394,7 +3481,9 @@ function formRecebida(id){
     + '<div class="grade">'
     + inp('reDesc','Descrição', c.DESCRICAO, 'full')
     + inp('reCliente','Cliente', c.CLIENTE)
-    + sel('reCat','Categoria (crédito)', opcoesCategorias('C', c.CATEGORIA, '— selecione —'), c.CATEGORIA)
+    + sel('reCat','Categoria (crédito)', opcoesCategorias('C', c.CATEGORIA, '— selecione —'), c.CATEGORIA, '',
+        'onchange="montaSubcat(\'reCat\',\'boxSubcatRE\',\'reSubcat\',\'\')"')
+    + '<div class="campo" id="boxSubcatRE" style="padding:0;margin:0"></div>'
     + inp('rePasta','Pasta do cliente', c.PASTA)
     + sel('rePraca','Praça', [['','— selecione —']].concat((DB.PRACAS||[]).filter(x => x.ATIVO !== 'NAO' || x.NOME === c.PRACA)
         .map(x => [x.NOME, x.NOME + (x.UF ? ' / ' + x.UF : '')])), c.PRACA)
@@ -3411,6 +3500,7 @@ function formRecebida(id){
     + '</div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
     + '<button class="btn" onclick="gravarRecebida(\''+id+'\','+total+')">Salvar</button>');
+  montaSubcat('reCat', 'boxSubcatRE', 'reSubcat', c.SUBCATEGORIA);
   sincronizaRecebida('esc', total);
 }
 function sincronizaRecebida(origem, totalFixo){
@@ -3457,7 +3547,7 @@ async function gravarRecebida(id, total){
   }
   const atualizado = Object.assign({}, c, {
     DESCRICAO:tit(val('reDesc')), CLIENTE:tit(val('reCliente')), CATEGORIA:val('reCat'),
-    PASTA:tit(val('rePasta')), PRACA:val('rePraca'), FILIAL:'',
+    SUBCATEGORIA:val('reSubcat'), PASTA:tit(val('rePasta')), PRACA:val('rePraca'), FILIAL:'',
     EXEC: val('reExec') ? 'SIM' : 'NAO',
     VALOR_ESCRITORIO:esc2, VALOR_CLIENTE:cli2, CP_ID:cpId, TARIFA:tar, OBS:val('reObs')});
   lote.push({aba:'CONTAS_RECEBER', registro: atualizado});
@@ -3537,8 +3627,11 @@ function selo(c){
 }
 /* conta recorrente ainda sem boleto: valor em branco */
 const semValorCP = c => c.STATUS !== 'Pago' && !n(c.VALOR);
+const semDadosCP = c => String(c.SEM_DADOS||'').toUpperCase() === 'SIM';
+const atrasadaCP = c => c.STATUS !== 'Pago' && String(c.VENCIMENTO||'') < hoje();
 function filtraLib(c, f){
   if (!f) return true;
+  if (f === 'banco') return semDadosCP(c);
   if (f === 'sem') return semValorCP(c);
   const t = liberacao(c).tipo;
   return f === 'nao' ? t === 'nao' : t !== 'nao';
@@ -3547,10 +3640,11 @@ function filtraLib(c, f){
 function botoesLib(base){
   const f = FILTROS.fLib || '';
   const op = [
-    ['',    'Todos',            base.length],
-    ['ok',  '✓ Recebidos',      base.filter(c => filtraLib(c,'ok')).length],
-    ['nao', '✕ Não recebidos',  base.filter(c => filtraLib(c,'nao')).length],
-    ['sem', 'Sem boleto',       base.filter(c => filtraLib(c,'sem')).length]
+    ['',      'Todos',                   base.length],
+    ['ok',    '✓ Recebidos',             base.filter(c => filtraLib(c,'ok')).length],
+    ['nao',   '✕ Não recebidos',         base.filter(c => filtraLib(c,'nao')).length],
+    ['sem',   'Sem boleto',              base.filter(c => filtraLib(c,'sem')).length],
+    ['banco', 'Sem dados bancários',     base.filter(c => filtraLib(c,'banco')).length]
   ];
   return '<div class="seg" role="group" aria-label="Filtrar por recebimento">'
     + op.map(([k,rot,qtd]) => '<button class="'+(f===k?'on':'')+' k'+(k||'todos')+'" onclick="setF(\'fLib\',\''+k+'\')">'
@@ -3581,6 +3675,47 @@ async function removerAnexoCP(id){
   try{ await salvarLoteRapido([{aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {ANEXO_URL:''})}]);
        toast('Boleto removido da conta.','ok'); }catch(e){}
 }
+async function alternarSemDados(id){
+  const c = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id); if (!c) return;
+  const marcado = semDadosCP(c);
+  try{
+    await salvarLoteRapido([{aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {SEM_DADOS: marcado ? '' : 'SIM'})}]);
+    toast(marcado ? 'Marcação removida.' : 'Marcado: não constam dados bancários.','ok');
+  }catch(e){}
+}
+/* lista dos repasses marcados, com os atrasados em destaque */
+function painelSemDados(){
+  const L = (DB.CONTAS_PAGAR||[]).filter(semDadosCP)
+    .sort((a,b) => String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO)));
+  const atrasados = L.filter(atrasadaCP);
+  const aVencer = L.filter(c => !atrasadaCP(c) && c.STATUS !== 'Pago');
+  const soma = arr => arr.reduce((s,c) => s + n(c.VALOR), 0);
+  const linha = c => '<tr'+(atrasadaCP(c) ? ' class="grifo"' : '')+'>'
+    + '<td>'+dataBR(c.VENCIMENTO)+(atrasadaCP(c) ? '<div class="mini neg">'
+        + Math.round(diasEntre(c.VENCIMENTO, hoje())) + ' dia(s) em atraso</div>' : '')+'</td>'
+    + '<td>'+esc(c.FAVORECIDO||'—')+'</td><td>'+esc(c.DESCRICAO||'—')+'</td>'
+    + '<td>'+selo(c)+'</td><td class="num">'+nMoeda(c.VALOR)+'</td>'
+    + '<td style="text-align:right;white-space:nowrap">'
+    + '<button class="btn sm sec" onclick="fecharModal();formCP(\''+c.ID+'\')">Abrir</button> '
+    + '<button class="btn sm sec" onclick="fecharModal();alternarSemDados(\''+c.ID+'\')">Desmarcar</button></td></tr>';
+  const tabela = (titulo, arr) => arr.length
+    ? '<h3 style="font-size:13px;padding:14px 0 6px;border:0">'+titulo+'</h3>'
+      + '<div class="tw"><table class="densa"><thead><tr><th>Vencimento</th><th>Favorecido</th><th>Descrição</th>'
+      + '<th>Recebido</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
+      + arr.map(linha).join('') + '</tbody></table></div>'
+    : '';
+  const corpo = L.length
+    ? '<div class="kpis" style="margin-bottom:6px">'
+      + kpi('Atrasados', moeda(soma(atrasados)), atrasados.length + ' repasse(s)', atrasados.length ? 'n' : '')
+      + kpi('A vencer', moeda(soma(aVencer)), aVencer.length + ' repasse(s)', 'b')
+      + kpi('Total marcado', moeda(soma(L)), L.length + ' conta(s)', 'd')
+      + '</div>'
+      + (atrasados.length ? tabela('Atrasados', atrasados) : '<p class="mini">Nenhum dos marcados está atrasado.</p>')
+      + tabela('Demais marcados', L.filter(c => !atrasadaCP(c)))
+    : vazio('Nenhuma conta marcada','Use o botão 🏦 na lista de contas a pagar para marcar os repasses sem dados bancários do cliente.');
+  modal('Repasses sem dados bancários', corpo,
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
+}
 function origemCP(c){
   const partes = [];
   if (c.ORIGEM && c.ORIGEM !== 'Manual') partes.push(c.ORIGEM);
@@ -3610,6 +3745,10 @@ function telaPagar(){
   return cabec('Contas a pagar', 'Apenas contas em aberto. ✕ = a parcela do cliente ainda não caiu; ✓ = já recebemos e o repasse pode ser pago. Ao conciliar o débito, a conta vai para Contas pagas.',
       '<button class="btn" onclick="formCP()">Lançar nova conta</button>'
     + '<button class="btn sec" onclick="formImportarCP()">Importar planilha</button>'
+    + '<button class="btn sec" onclick="painelSemDados()">Sem dados bancários'
+      + (((DB.CONTAS_PAGAR||[]).filter(c => semDadosCP(c) && atrasadaCP(c)).length)
+          ? ' (' + (DB.CONTAS_PAGAR||[]).filter(c => semDadosCP(c) && atrasadaCP(c)).length + ')' : '')
+      + '</button>'
     + '<button class="btn sec" onclick="exportarCSV(\'contas-a-pagar\')">Exportar CSV</button>')
     + '<div class="kpis">'
     + kpi('Em aberto', moeda(abertas.reduce((s,c)=>s+n(c.VALOR),0)), abertas.length + ' conta(s)', 'b')
@@ -3633,9 +3772,16 @@ function telaPagar(){
       + '<td>'+dataBR(c.VENCIMENTO)+'</td><td'+(c.OBS?' title="'+esc(c.OBS)+'"':'')+'>'+esc(c.DESCRICAO)
       + (c.ANEXO_URL ? ' <a href="'+esc(c.ANEXO_URL)+'" target="_blank" rel="noopener" title="Abrir o boleto">📎</a>' : '')
       + origemCP(c) + '</td>'
-      + '<td>'+esc(c.FAVORECIDO||'—')+'</td><td>'+esc(c.CATEGORIA||'—')+'</td>'
+      + '<td>'+esc(c.FAVORECIDO||'—')
+      + (semDadosCP(c) ? '<div class="mini"><span class="tag t-pend">sem dados bancários</span></div>' : '')+'</td>'
+      + '<td>'+esc(c.CATEGORIA||'—')
+      + (c.SUBCATEGORIA ? '<div class="mini">'+esc(c.SUBCATEGORIA)+'</div>' : '')+'</td>'
       + '<td class="num">'+(semValorCP(c) ? '<span class="tag t-pend">boleto não recebido</span>' : nMoeda(c.VALOR))+'</td>'
       + '<td style="text-align:right;white-space:nowrap">'
+      + '<button class="btn sm '+(semDadosCP(c)?'':'sec')+'" title="'
+        + (semDadosCP(c) ? 'Marcado como sem dados bancários — clique para desmarcar' : 'Marcar que não constam dados bancários')
+        + '" onclick="alternarSemDados(\''+c.ID+'\')"'
+        + (semDadosCP(c) ? ' style="background:var(--brass)"' : '') + '>🏦</button> '
       + '<button class="btn sm sec" onclick="formCP(\''+c.ID+'\')">Editar</button> '
       + '<button class="btn sm per" onclick="apagarSimples(\'CONTAS_PAGAR\',\''+c.ID+'\')">Excluir</button>'
       + '</td></tr>').join('')
@@ -3653,9 +3799,13 @@ function formCP(id){
       + '<input id="cpFav" list="dlFav" autocomplete="off" value="'+esc(c.FAVORECIDO||'')+'" placeholder="digite para buscar" oninput="favEscolhido()" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r)">'
       + '<button class="btn sec" style="padding:8px 12px" title="Adicionar aos favorecidos" onclick="addFavorecidoRapido(\'cpFav\',\'cpCat\')">+</button></div>'
       + '<datalist id="dlFav">'+optsFavorecidos()+'</datalist></div>'
-    + sel('cpCat','Categoria (débito)', opcoesCategorias('D', c.CATEGORIA, '— selecione —'), c.CATEGORIA, '', 'onchange="this.dataset.tocado=1"')
+    + sel('cpCat','Categoria (débito)', opcoesCategorias('D', c.CATEGORIA, '— selecione —'), c.CATEGORIA, '',
+        'onchange="this.dataset.tocado=1;montaSubcat(\'cpCat\',\'boxSubcatCP\',\'cpSubcat\',\'\')"')
+    + '<div class="campo" id="boxSubcatCP" style="padding:0;margin:0"></div>'
     + inp('cpVenc','Vencimento', c.VENCIMENTO || hoje(), '', 'date')
     + inp('cpValor','Valor (R$)', c.VALOR ? nMoeda(c.VALOR) : '')
+    + '<div class="check full"><input type="checkbox" id="cpSemDados"'+(String(c.SEM_DADOS||'').toUpperCase()==='SIM'?' checked':'')+'>'
+      + '<label for="cpSemDados">Não consta dados bancários — o cliente ainda não informou a conta para o repasse</label></div>'
     + '<div class="campo full"><label for="cpObs">Observações</label><textarea id="cpObs" rows="2">'+esc(c.OBS||'')+'</textarea></div>'
     + '<div class="campo full"><label for="cpArq">Boleto (PDF ou imagem)</label>'
       + '<input type="file" id="cpArq" accept=".pdf,.jpg,.jpeg,.png">'
@@ -3672,6 +3822,7 @@ function formCP(id){
     + '</div>'
     + '<p class="mini" style="margin-top:8px">A conta é dada como paga apenas quando o débito correspondente for conciliado no extrato.</p>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" onclick="gravarCP(\''+(id||'')+'\')">Salvar conta</button>');
+  montaSubcat('cpCat', 'boxSubcatCP', 'cpSubcat', c.SUBCATEGORIA);
 }
 /* ao escolher um favorecido já cadastrado, puxa a categoria padrão dele */
 function favEscolhido(){ aplicarCategoriaFavorecido('cpFav','cpCat'); }
@@ -3722,7 +3873,8 @@ async function gravarCP(id){
   if (!val('cpDesc')) return toast('Informe a descrição.','erro');
   if (!recorrente && !n(val('cpValor'))) return toast('Informe o valor.','erro');
   const atual = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id) || {};
-  const comum = { DESCRICAO:tit(val('cpDesc')), FAVORECIDO:tit(val('cpFav')), CATEGORIA:val('cpCat'), OBS:val('cpObs') };
+  const comum = { DESCRICAO:tit(val('cpDesc')), FAVORECIDO:tit(val('cpFav')), CATEGORIA:val('cpCat'),
+                  SUBCATEGORIA:val('cpSubcat'), SEM_DADOS: val('cpSemDados') ? 'SIM' : '', OBS:val('cpObs') };
 
   const fav = garantirFavorecido(tit(val('cpFav')), val('cpCat'));
   // o boleto sobe para o Drive antes de gravar a conta
