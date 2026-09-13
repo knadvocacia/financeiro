@@ -278,7 +278,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v5.1';
+const VERSAO_APP = 'v5.2';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -411,6 +411,7 @@ async function salvar(aba, reg, silencio){
     const L = DB[aba] || (DB[aba] = []);
     const i = L.findIndex(x => x.ID === j.registro.ID);
     if (i >= 0) L[i] = j.registro; else L.push(j.registro);
+    invalidarIdx();
     if (!silencio) toast('Salvo.','ok');
     return j.registro;
   }
@@ -476,12 +477,12 @@ function salvarLoteRapido(lote){
     const i = L.findIndex(x => x.ID === it.registro.ID);
     if (i >= 0) L[i] = it.registro; else L.push(it.registro);
   });
-  render();
+  invalidarIdx(); render();
   return enfileirar(lote, []);
 }
 function excluirLoteRapido(apagar){
   apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
-  render();
+  invalidarIdx(); render();
   return enfileirar([], apagar);
 }
 window.addEventListener('beforeunload', e => {
@@ -501,6 +502,7 @@ async function carregar(avisar){
   try{
     const j = await api({action:'carregar'});
     DB = j.dados; DB._planilha = j.planilha; DB._pasta = j.pasta; DB._versao = j.versao;
+    invalidarIdx();
     $('#hdEscritorio').textContent = cfg('NOME_ESCRITORIO','Escritório de advocacia');
     const marca = document.getElementById('hdMarca');
     if (marca) marca.title = 'Página ' + VERSAO_APP + ' · servidor ' + (DB._versao || '—');
@@ -579,6 +581,7 @@ function pintarNav(){
   }).join('');
 }
 function render(){
+  invalidarIdx();
   if (!podeVer(ABA)){
     const primeira = MODULOS.filter(m => m.k && podeVer(m.k))[0];
     ABA = primeira ? primeira.k : '';
@@ -648,14 +651,47 @@ function selMes(id, valor){
     + [...meses].filter(Boolean).sort().reverse().map(m => '<option value="'+m+'"'+(valor===m?' selected':'')+'>'+mesBR(m)+'</option>').join('') + '</select></div>';
 }
 
+/* ── ÍNDICES ──
+   Buscar por ID varrendo o array inteiro custa caro quando há milhares de
+   parcelas: a mesma tela chega a fazer milhões de comparações. Estes mapas
+   são montados uma vez e refeitos só quando os dados mudam. */
+let IDX = null;
+/* assinatura barata para pegar mudanças que não passaram por invalidarIdx */
+function assinaturaDB(){
+  return ['LANCAMENTOS','PARCELAS','CONTAS_PAGAR','CONTAS_RECEBER','EXTRATO','COMISSOES','SUBCLASSES','CONTAS_BANCO']
+    .map(k => (DB[k]||[]).length).join('|');
+}
+function indices(){
+  if (IDX && IDX.sig === assinaturaDB()) return IDX;
+  const mapa = (arr, chave) => {
+    const m = new Map();
+    (arr||[]).forEach(x => { const k = chave ? x[chave] : x.ID; if (k) m.set(k, x); });
+    return m;
+  };
+  IDX = {
+    lanc: mapa(DB.LANCAMENTOS), parc: mapa(DB.PARCELAS),
+    cp: mapa(DB.CONTAS_PAGAR), cr: mapa(DB.CONTAS_RECEBER),
+    crPorCp: mapa((DB.CONTAS_RECEBER||[]).filter(c => c.CP_ID), 'CP_ID'),
+    comis: mapa(DB.COMISSIONADOS), cache: {}, sig: assinaturaDB()
+  };
+  return IDX;
+}
+function invalidarIdx(){ IDX = null; }
+/* guarda o resultado de contas pesadas até os dados mudarem */
+function memo(chave, fn){
+  const c = indices().cache;
+  if (c[chave] === undefined) c[chave] = fn();
+  return c[chave];
+}
+
 /* ── ATALHOS AOS DADOS ── */
 function pastaCliente(pasta, cliente){
   const a = '<b>'+esc(pasta||'—')+'</b>';
   return cliente ? a + ' <span style="color:var(--ink3)">·</span> <b>'+esc(cliente)+'</b>' : a;
 }
-const lancDe = id => (DB.LANCAMENTOS||[]).find(l => l.ID === id) || {};
-const parcDe = id => (DB.PARCELAS||[]).find(p => p.ID === id) || null;
-const nomeComissionado = id => ((DB.COMISSIONADOS||[]).find(c => c.ID === id) || {}).NOME || '—';
+const lancDe = id => indices().lanc.get(id) || {};
+const parcDe = id => indices().parc.get(id) || null;
+const nomeComissionado = id => (indices().comis.get(id) || {}).NOME || '—';
 const tarifaPadrao = () => n(cfg('TARIFA_PADRAO','2,50')) || 2.5;
 /* ══════════════════ CONFIGURAÇÕES (engrenagem) ══════════════════ */
 let CFGABA = 'contas';
@@ -1829,7 +1865,8 @@ function sucDaParcela(p, valorCreditado){
   return (v && base && Math.abs(v - base) > 0.01) ? rd(s * v / base) : rd(s);
 }
 /* candidatos para um crédito na conta: parcelas em aberto e recebimentos avulsos */
-function candidatosCredito(){
+function candidatosCredito(){ return memo('credito', montarCredito); }
+function montarCredito(){
   const out = [];
   pendentesReceber().forEach(p => {
     const l = lancDe(p.LANC_ID);
@@ -1846,7 +1883,8 @@ function candidatosCredito(){
   return out;
 }
 /* candidatos para um débito na conta: contas a pagar em aberto e já liberadas */
-function candidatosDebito(){
+function candidatosDebito(){ return memo('debito', montarDebito); }
+function montarDebito(){
   // contas sem valor (boleto ainda não recebido) não entram como sugestão
   return (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && n(c.VALOR) > 0 && liberacao(c).tipo !== 'nao').map(c => ({
     tipo:'pagar', id:c.ID, valor:n(c.VALOR), venc:c.VENCIMENTO,
@@ -1976,9 +2014,20 @@ function listaPendentes(pend){
     + sel('fTipoMov','Tipo', [['','Créditos e débitos'],['C','Só créditos'],['D','Só débitos']], tipo, '', 'onchange="setF(\'fTipoMov\',this.value)"')
     + '</div>';
   if (!L.length) return filtros + '<div class="card">'+vazio('Nada neste filtro','Ajuste a busca ou o tipo de movimento.')+'</div>';
-  return filtros + L.map(m => '<div class="card fino"><div class="corpo conc">'
+  // cada movimento na tela pesquisa todos os registros em aberto; mostrar em
+  // blocos mantém a conciliação instantânea mesmo com centenas de pendências
+  const passo = 20;
+  const quantos = Math.min(L.length, FILTROS.pendVis || passo);
+  return filtros
+    + L.slice(0, quantos).map(m => '<div class="card fino"><div class="corpo conc">'
       + ladoMovimento(m)
-      + '<div class="sugs">' + boxSugestoes(m) + '</div></div></div>').join('');
+      + '<div class="sugs">' + boxSugestoes(m) + '</div></div></div>').join('')
+    + (quantos < L.length
+        ? '<div style="text-align:center;margin:14px 0">'
+          + '<button class="btn sec" onclick="setF(\'pendVis\','+(quantos+passo)+')">'
+          + 'Mostrar mais ' + Math.min(passo, L.length - quantos)
+          + ' de ' + (L.length - quantos) + ' restantes</button></div>'
+        : '');
 }
 function ladoMovimento(m, extras){
   return '<div class="lado">'
@@ -2014,11 +2063,11 @@ function alvoUnico(id){
     return {tipo:'parcela', id, p, l, quem:pastaCliente(l.PASTA, l.CLIENTE),
             resumo:(l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—'),
             cli:n(p.VALOR_CLIENTE), esc:n(p.VALOR_ESCRITORIO)}; }
-  const cp = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id);
+  const cp = indices().cp.get(id);
   if (cp) return {tipo:'pagar', id, cp, quem:'<b>'+esc(cp.FAVORECIDO||cp.DESCRICAO||'—')+'</b>'
             + '<div class="mini">'+esc(cp.CATEGORIA||'')+'</div>',
             resumo:(cp.FAVORECIDO || cp.DESCRICAO || '—'), cli:0, esc:0};
-  const cr = (DB.CONTAS_RECEBER||[]).find(x => x.ID === id);
+  const cr = indices().cr.get(id);
   if (cr) return {tipo:'receber', id, cr,
     quem: cr.PASTA ? pastaCliente(cr.PASTA, cr.CLIENTE) : '<b>'+esc(cr.CLIENTE||cr.DESCRICAO||'—')+'</b>',
     resumo:(cr.CLIENTE || cr.DESCRICAO || '—'),
@@ -2176,9 +2225,9 @@ function comissoesDoRecebimento(cr, valor, data){
 function loteDoAlvo(m, alvoId, valor){
   const p = parcDe(alvoId);
   if (p) return loteParcela(m, p, valor);
-  const cp = (DB.CONTAS_PAGAR||[]).find(x => x.ID === alvoId);
+  const cp = indices().cp.get(alvoId);
   if (cp) return lotePagamento(m, cp, valor);
-  const cr = (DB.CONTAS_RECEBER||[]).find(x => x.ID === alvoId);
+  const cr = indices().cr.get(alvoId);
   if (cr) return loteRecebimento(m, cr, valor);
   return {erro:'Registro de destino não encontrado.'};
 }
@@ -2207,12 +2256,10 @@ async function conciliarVarios(movId, itens){
   lote.push({aba:'EXTRATO', registro: Object.assign({}, m,
     {STATUS:'Conciliado', PARCELA_ID: sel.map(x => x.id).join('|')})});
 
-  try{
-    await salvarLoteRapido(lote);
-    toast(sel.length > 1
-      ? 'Movimento conciliado com ' + sel.length + ' registros.'
-      : 'Conciliado — ' + resumos[0] + '.', 'ok');
-  }catch(e){}
+  salvarLoteRapido(lote);
+  toast(sel.length > 1
+    ? 'Movimento conciliado com ' + sel.length + ' registros.'
+    : 'Conciliado — ' + resumos[0] + '.', 'ok');
 }
 
 /* ── Vincular vários registros a um movimento ── */
@@ -3779,10 +3826,10 @@ function liberacao(c){
 function recebimentoDoRepasse(c){
   const L = DB.CONTAS_RECEBER || [];
   if (c.PARCELA_ID){
-    const direto = L.find(x => x.ID === c.PARCELA_ID);
+    const direto = indices().cr.get(c.PARCELA_ID);
     if (direto) return direto;
   }
-  const porCp = L.find(x => x.CP_ID && x.CP_ID === c.ID);
+  const porCp = indices().crPorCp.get(c.ID);
   if (porCp) return porCp;
   if (c.CATEGORIA !== 'Repasse a cliente' && c.ORIGEM !== 'Repasse de recebimento') return null;
   const valor = rd(n(c.VALOR)), quem = String(c.FAVORECIDO||'').trim().toLowerCase();
