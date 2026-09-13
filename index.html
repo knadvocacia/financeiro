@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.6';
+const VERSAO_APP = 'v4.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -891,6 +891,9 @@ const catRateia = nome => (DB.SUBCLASSES||[]).some(c => c.NOME === nome && Strin
 /* grupo de DRE de uma categoria; vazio significa o DRE do escritório */
 /* categoria de acordo parcelado: abre os campos do lançamento na conciliação */
 const catAcordo = nome => (DB.SUBCLASSES||[]).some(c => c.NOME === nome && String(c.ACORDO||'').toUpperCase() === 'SIM');
+/* acordo CPC: até 7 parcelas com valor do cliente e do escritório digitados */
+const catCPC = nome => (DB.SUBCLASSES||[]).some(c => c.NOME === nome && String(c.CPC||'').toUpperCase() === 'SIM');
+const PARCELAS_CPC = 7;
 const GRUPO_PADRAO = 'Escritório';
 const grupoDaCat = nome => {
   const c = (DB.SUBCLASSES||[]).find(x => x.NOME === nome);
@@ -922,6 +925,7 @@ function cfgSubclasses(){
     + '<td><span class="tag '+(ehDebitoCat(s)?'t-ni':'t-ok')+'">'+(ehDebitoCat(s)?'Débito':'Crédito')+'</span>'
     + (String(s.RATEIO||'').toUpperCase() === 'SIM' ? ' <span class="tag t-pend">divide com o cliente</span>' : '')
     + (String(s.ACORDO||'').toUpperCase() === 'SIM' ? ' <span class="tag t-pend">acordo parcelado</span>' : '')
+    + (String(s.CPC||'').toUpperCase() === 'SIM' ? ' <span class="tag t-pend">acordo CPC</span>' : '')
     + (String(s.GRUPO||'').trim() ? ' <span class="tag t-neutro">'+esc(s.GRUPO)+'</span>' : '')+'</td>'
     + '<td style="text-align:right;white-space:nowrap">'
     + '<button class="btn sm sec" onclick="formSubclasse(\''+s.ID+'\')">Editar</button> '
@@ -939,7 +943,7 @@ async function addSubclasse(){
   const nome = tit(val('novaSub')); if (!nome) return toast('Informe o nome da categoria.','erro');
   if ((DB.SUBCLASSES||[]).some(c => c.NOME.toLowerCase() === nome.toLowerCase()))
     return toast('Já existe uma categoria com esse nome.','erro');
-  await salvar('SUBCLASSES', {ID:'', NOME:nome, TIPO:val('novaSubTipo'), RATEIO:'', GRUPO:'', ACORDO:''}); abrirConfig('subclasses');
+  await salvar('SUBCLASSES', {ID:'', NOME:nome, TIPO:val('novaSubTipo'), RATEIO:'', GRUPO:'', ACORDO:'', CPC:''}); abrirConfig('subclasses');
 }
 function formSubclasse(id){
   const s = (DB.SUBCLASSES||[]).find(x => x.ID === id) || {};
@@ -951,6 +955,8 @@ function formSubclasse(id){
     + '<label for="sbRateio">Divide com o cliente — ao conciliar um crédito desta categoria, o sistema pede o valor do escritório e o do cliente</label></div>'
     + '<div class="check full"><input type="checkbox" id="sbAcordo"'+(String(s.ACORDO||'').toUpperCase()==='SIM'?' checked':'')+'>'
     + '<label for="sbAcordo">Acordo parcelado — ao conciliar um crédito desta categoria, abre os campos do lançamento (pasta, processo, parcelas, rateio e sucumbência)</label></div>'
+    + '<div class="check full"><input type="checkbox" id="sbCPC"'+(String(s.CPC||'').toUpperCase()==='SIM'?' checked':'')+'>'
+    + '<label for="sbCPC">Acordo CPC — abre '+PARCELAS_CPC+' parcelas com o valor do cliente e do escritório digitados em cada uma</label></div>'
     + '<div class="campo full"><label for="sbGrupo">Grupo do DRE</label>'
       + '<input id="sbGrupo" list="dlGrupos" value="'+esc(s.GRUPO||'')+'" placeholder="'+esc(GRUPO_PADRAO)+' (em branco)">'
       + '<datalist id="dlGrupos">'
@@ -967,7 +973,8 @@ async function gravarSubclasse(id, antigo){
   const lote = [{aba:'SUBCLASSES', registro:{ID:id, NOME:nome, TIPO:val('sbTipo'),
     RATEIO: (val('sbTipo').charAt(0).toLowerCase() !== 'd' && val('sbRateio')) ? 'SIM' : '',
     GRUPO: tit(val('sbGrupo')) === GRUPO_PADRAO ? '' : tit(val('sbGrupo')),
-    ACORDO: (val('sbTipo').charAt(0).toLowerCase() !== 'd' && val('sbAcordo')) ? 'SIM' : ''}}];
+    ACORDO: (val('sbTipo').charAt(0).toLowerCase() !== 'd' && (val('sbAcordo') || val('sbCPC'))) ? 'SIM' : '',
+    CPC: (val('sbTipo').charAt(0).toLowerCase() !== 'd' && val('sbCPC')) ? 'SIM' : ''}}];
   (DB.REGRAS_COMISSAO||[]).filter(r => r.SUBCLASSE === antigo).forEach(r =>
     lote.push({aba:'REGRAS_COMISSAO', registro: Object.assign({}, r, {SUBCLASSE:nome})}));
   (DB.LANCAMENTOS||[]).filter(l => l.SUBCLASSE === antigo).forEach(l =>
@@ -1272,7 +1279,8 @@ function formLanc(id){
   const l = id ? lancDe(id) : {};
   PARC_TMP = id ? (DB.PARCELAS||[]).filter(p => p.LANC_ID === id && p.TIPO !== 'Sucumbência')
                     .sort((a,b) => n(a.NUM) - n(b.NUM))
-                    .map(p => ({ID:p.ID, VENCIMENTO:p.VENCIMENTO, VALOR:n(p.VALOR), STATUS:p.STATUS}))
+                    .map(p => ({ID:p.ID, VENCIMENTO:p.VENCIMENTO, VALOR:n(p.VALOR), STATUS:p.STATUS,
+                                ESC_PREV:p.ESC_PREV}))
                 : [];
   const subs = opcoesCategorias('C', l.SUBCLASSE, '— selecione —');
   const prcs = [['','— selecione —']].concat((DB.PRACAS||[]).filter(f => f.ATIVO !== 'NAO')
@@ -1299,7 +1307,7 @@ function formLanc(id){
     + inp('lcDataAcordo','Data do acordo', l.DATA_ACORDO || '', '', 'date')
     + sel('lcAudiencia','Audiência', [['','— selecione —']].concat(AUDIENCIAS.map(a => [a,a])), l.AUDIENCIA)
     + inp('lcAdvogado','Advogado que fez o acordo', l.ADVOGADO)
-    + sel('lcSub','Categoria', subs, l.SUBCLASSE)
+    + sel('lcSub','Categoria', subs, l.SUBCLASSE, '', 'onchange="trocarModoParcelas()"')
     + '<div class="check"><input type="checkbox" id="lcExec"'+(l.EXEC==='SIM'?' checked':'')+'><label for="lcExec">Cálculo feito pela EXEC</label></div>'
 
     + '<div class="secao-form">Valores e rateio</div>'
@@ -1319,8 +1327,7 @@ function formLanc(id){
     + '</div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" onclick="gravarLanc(\''+(id||'')+'\')">Salvar lançamento</button>',
     'larga');
-  pintarParcelas();
-  if (!id) recalcParcelas();
+  trocarModoParcelas();
 }
 function espelhaPct(origem){
   const cli = document.getElementById('lcPctCli'), esce = document.getElementById('lcPctEsc');
@@ -1353,8 +1360,79 @@ function recalcParcelas(){
   }
   PARC_TMP = novas; pintarParcelas();
 }
+/* alterna entre o parcelamento normal e o do acordo CPC */
+function trocarModoParcelas(){
+  if (catCPC(val('lcSub'))){
+    if (!PARC_TMP.length || PARC_TMP[0].CLI === undefined) montarCPC();
+    else pintarParcelas();
+  } else {
+    if (PARC_TMP.length && PARC_TMP[0].CLI !== undefined) PARC_TMP = [];
+    recalcParcelas();
+  }
+}
+function montarCPC(){
+  const existentes = PARC_TMP.filter(p => n(p.VALOR) || p.ID);
+  const base = val('lcPrim') || hoje();
+  PARC_TMP = [];
+  for (let i = 0; i < PARCELAS_CPC; i++){
+    const ant = existentes[i];
+    if (ant){
+      const esc2 = n(ant.ESC_PREV != null ? ant.ESC_PREV : ant.ESC);
+      PARC_TMP.push({ID:ant.ID || '', VENCIMENTO:ant.VENCIMENTO, CLI:rd(n(ant.VALOR) - esc2),
+                     ESC:esc2, ATIVA:true, STATUS:ant.STATUS || 'A receber'});
+    } else {
+      const d = new Date(base + 'T12:00'); d.setMonth(d.getMonth() + i);
+      PARC_TMP.push({ID:'', VENCIMENTO:d.toISOString().slice(0,10), CLI:0, ESC:0,
+                     ATIVA:i < existentes.length, STATUS:'A receber'});
+    }
+  }
+  pintarParcelas();
+}
+function alternarParcelaCPC(i){
+  const p = PARC_TMP[i];
+  if (p.STATUS === 'Recebida') return toast('Esta parcela já foi recebida e não pode ser desconsiderada.','erro');
+  p.ATIVA = !p.ATIVA;
+  pintarParcelas();
+}
+function pintarCPC(box){
+  const tarifa = val('lcTarifa') ? rd(n(val('lcTarifaV')) || tarifaPadrao()) : 0;
+  const ativas = PARC_TMP.filter(p => p.ATIVA);
+  const somaCli = ativas.reduce((s,p) => s + n(p.CLI), 0);
+  const somaEsc = ativas.reduce((s,p) => s + n(p.ESC), 0);
+  const cel = (i, campo, v) => '<input value="'+(n(v) ? nMoeda(v) : '')+'" '
+    + (PARC_TMP[i].STATUS === 'Recebida' ? 'disabled ' : '')
+    + 'oninput="PARC_TMP['+i+'].'+campo+'=n(this.value)" onblur="pintarParcelas()" '
+    + 'style="width:110px;text-align:right;padding:4px 6px;border:1px solid var(--line);border-radius:4px;'
+    + 'font-family:\'IBM Plex Mono\',monospace">';
+  box.innerHTML = '<div class="tw"><table><thead><tr><th style="width:34px"></th><th>Parcela</th><th>Vencimento</th>'
+    + '<th class="num">Valor cliente</th><th class="num">Valor escritório</th><th class="num">Total</th><th>Situação</th></tr></thead><tbody>'
+    + PARC_TMP.map((p,i) => {
+        const total = rd(n(p.CLI) + n(p.ESC));
+        return '<tr'+(p.ATIVA ? '' : ' style="opacity:.45"')+'>'
+          + '<td><button class="btn sm '+(p.ATIVA ? 'per' : 'sec')+'" title="'
+          + (p.ATIVA ? 'Desconsiderar esta parcela' : 'Voltar a considerar esta parcela')
+          + '" onclick="alternarParcelaCPC('+i+')">'+(p.ATIVA ? '✕' : '↺')+'</button></td>'
+          + '<td><b>Parcela '+(i+1)+'</b></td>'
+          + '<td><input type="date" value="'+esc(p.VENCIMENTO)+'" '+(p.STATUS==='Recebida'?'disabled':'')
+            + ' onchange="PARC_TMP['+i+'].VENCIMENTO=this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:4px"></td>'
+          + '<td class="num">'+cel(i,'CLI',p.CLI)+'</td>'
+          + '<td class="num">'+cel(i,'ESC',p.ESC)+'</td>'
+          + '<td class="num">'+(total ? nMoeda(total) : '—')+'</td>'
+          + '<td>'+(p.ATIVA
+              ? '<span class="tag '+(p.STATUS==='Recebida'?'t-ok':'t-pend')+'">'+esc(p.STATUS||'A receber')+'</span>'
+              : '<span class="tag t-neutro">desconsiderada</span>')+'</td></tr>';
+      }).join('')
+    + '</tbody><tfoot><tr><th colspan="3" style="text-align:right">Totais das '+ativas.length+' parcela(s) consideradas</th>'
+    + '<th class="num">'+nMoeda(somaCli)+'</th><th class="num">'+nMoeda(somaEsc)+'</th>'
+    + '<th class="num">'+nMoeda(rd(somaCli+somaEsc))+'</th><th></th></tr></tfoot></table></div>'
+    + '<p class="mini" style="margin-top:6px">Acordo CPC: os valores do cliente e do escritório são digitados em cada parcela, '
+    + 'sem percentual. O ✕ desconsidera a parcela, e o ↺ traz de volta. '
+    + (tarifa ? 'A tarifa de '+moeda(tarifa)+' ainda sai do cliente e vai para o escritório em cada parcela.' : '')
+    + '</p>';
+}
 function pintarParcelas(){
   const box = document.getElementById('boxParcelas'); if (!box) return;
+  if (catCPC(val('lcSub'))) return pintarCPC(box);
   if (!PARC_TMP.length){ box.innerHTML = '<p class="mini">Informe o valor total e a quantidade de parcelas.</p>'; return; }
   const soma = PARC_TMP.reduce((s,p) => s + n(p.VALOR), 0);
   const suc = rd(n(val('lcSuc'))), totalAcordo = rd(n(val('lcTotal')));
@@ -1385,9 +1463,18 @@ function pintarParcelas(){
 async function gravarLanc(id, opcoes){
   const op = opcoes || {};
   if (!val('lcCliente')) return toast('Informe o cliente.','erro');
+  const cpc = catCPC(val('lcSub'));
+  if (cpc){
+    PARC_TMP = PARC_TMP.filter(p => p.ATIVA && rd(n(p.CLI) + n(p.ESC)) > 0)
+      .map(p => Object.assign({}, p, {VALOR: rd(n(p.CLI) + n(p.ESC))}));
+    if (!PARC_TMP.length) return toast('Informe o valor de ao menos uma parcela.','erro');
+  }
   if (!PARC_TMP.length) return toast('Gere ao menos uma parcela.','erro');
-  const pctCli = n(val('lcPctCli')), pctEsc = n(val('lcPctEsc'));
-  if (rd(pctCli + pctEsc) !== 100) return toast('Os percentuais de cliente e escritório devem somar 100%.','erro');
+  const somaT = rd(PARC_TMP.reduce((s,p) => s + n(p.VALOR), 0));
+  const somaE = cpc ? rd(PARC_TMP.reduce((s,p) => s + n(p.ESC), 0)) : 0;
+  const pctCli = cpc ? (somaT ? rd((somaT - somaE) / somaT * 100) : 0) : n(val('lcPctCli'));
+  const pctEsc = cpc ? (somaT ? rd(somaE / somaT * 100) : 0) : n(val('lcPctEsc'));
+  if (!cpc && rd(pctCli + pctEsc) !== 100) return toast('Os percentuais de cliente e escritório devem somar 100%.','erro');
 
   const lanc = {
     ID: id || uid('l'), PASTA: tit(val('lcPasta')), CLIENTE: tit(val('lcCliente')), DOC: val('lcDoc'),
@@ -1410,7 +1497,8 @@ async function gravarLanc(id, opcoes){
     if (antiga && antiga.STATUS === 'Recebida') return;
     const parcId = p.ID || uid('p');
     const tarifa = lanc.TARIFA_ATIVA === 'SIM' ? rd(n(lanc.TARIFA_VALOR) || tarifaPadrao()) : 0;
-    const vCli = rd((n(p.VALOR) - sucs[i]) * pctCli / 100 - tarifa);
+    const escP = cpc ? rd(n(p.ESC)) : rd(sucs[i] + (n(p.VALOR) - sucs[i]) * pctEsc / 100);
+    const vCli = rd(n(p.VALOR) - escP - tarifa);
     const cpAntigo = (DB.CONTAS_PAGAR||[]).find(c => c.ID === (antiga||{}).CP_ID)
                   || (DB.CONTAS_PAGAR||[]).find(c => c.PARCELA_ID === parcId && c.CATEGORIA === 'Repasse a cliente');
     const cpId = vCli > 0 ? (cpAntigo ? cpAntigo.ID : uid('cp')) : '';
@@ -1418,7 +1506,7 @@ async function gravarLanc(id, opcoes){
       ID: parcId, LANC_ID: lanc.ID, TIPO:'Parcela', NUM: i+1,
       VENCIMENTO: p.VENCIMENTO, VALOR: rd(p.VALOR), STATUS:'A receber',
       DATA_CREDITO:'', VALOR_CREDITADO:'', MOV_ID:'', VALOR_CLIENTE:'', VALOR_ESCRITORIO:'', TARIFA:'',
-      CP_ID: cpId, OBS:'', SUCUMBENCIA: sucs[i] || ''
+      CP_ID: cpId, OBS:'', SUCUMBENCIA: cpc ? '' : (sucs[i] || ''), ESC_PREV: cpc ? escP : ''
     })});
     // repasse ao cliente já entra em contas a pagar, bloqueado até a conciliação
     if (vCli > 0){
@@ -1428,7 +1516,7 @@ async function gravarLanc(id, opcoes){
         STATUS: (cpAntigo && cpAntigo.STATUS) || 'Em aberto', DATA_PGTO: (cpAntigo && cpAntigo.DATA_PGTO) || '',
         ORIGEM:'Repasse de parcela', PARCELA_ID: parcId, ANEXO_URL:'',
         OBS:'Valor previsto sobre a parcela de '+moeda(p.VALOR)+' · '
-            + memoriaRateio(n(p.VALOR), lanc, tarifa, sucs[i])
+            + memoriaValores(n(p.VALOR), escP, tarifa, cpc ? 0 : sucs[i])
             + ' · aguardando o crédito da parcela'
       })});
     } else if (cpAntigo){
@@ -1578,6 +1666,28 @@ function memoriaRateio(valor, l, tarifa, suc){
     + ' · ' + pct(l.PCT_ESCRITORIO) + ' para o escritório = ' + moeda(bruEsc)
     + (tarifa ? ', mais a tarifa de ' + moeda(tarifa) : '')
     + ', total para o escritório ' + moeda(rd(s + bruEsc + tarifa));
+}
+/* memória de cálculo a partir dos valores, cobrindo também o acordo CPC */
+function memoriaValores(valor, escSemTarifa, tarifa, sucP){
+  const cli = rd(valor - escSemTarifa - tarifa);
+  const escF = rd(escSemTarifa + tarifa);
+  if (rd(sucP) >= rd(valor)) return 'honorários de sucumbência, 100% para o escritório = ' + moeda(valor);
+  return (sucP ? 'sucumbência de ' + moeda(sucP) + ' integral do escritório · ' : '')
+    + 'cliente ' + moeda(cli) + ' (' + pctSobre(rd(cli + tarifa), valor) + ')'
+    + (tarifa ? ', já sem a tarifa de ' + moeda(tarifa) : '')
+    + ' · escritório ' + moeda(escF) + ' (' + pctSobre(escSemTarifa, valor) + ')'
+    + (tarifa ? ', com a tarifa de ' + moeda(tarifa) + ' revertida' : '');
+}
+/* Parte do escritório numa parcela, sem a tarifa.
+   No acordo CPC vem digitada na parcela; nos demais sai da sucumbência mais o percentual. */
+function escPrevisto(p, l, valorCreditado){
+  const v = rd(n(valorCreditado) || n(p.VALOR));
+  if (String(p.ESC_PREV == null ? '' : p.ESC_PREV).trim() !== ''){
+    const base = n(p.VALOR);
+    return (base && Math.abs(v - base) > 0.01) ? rd(n(p.ESC_PREV) * v / base) : rd(n(p.ESC_PREV));
+  }
+  const sp = p.TIPO === 'Sucumbência' ? v : sucDaParcela(p, v);
+  return rd(sp + (v - sp) * n((l||{}).PCT_ESCRITORIO) / 100);
 }
 /* parte da sucumbência que cabe a uma parcela, proporcional ao valor dela */
 function sucDaParcela(p, valorCreditado){
@@ -1852,12 +1962,11 @@ async function conciliarParcela(m, p){
   const valor = Math.abs(n(m.VALOR));
   const suc = p.TIPO === 'Sucumbência';
   const sucP = suc ? valor : sucDaParcela(p, valor);          // fatia de sucumbência desta parcela
-  const rateavel = rd(valor - sucP);
   const tarifa = (!suc && l.TARIFA_ATIVA !== 'NAO') ? rd(n(l.TARIFA_VALOR) || tarifaPadrao()) : 0;
   // base de comissão = parte do escritório SEM a tarifa; a tarifa sai do cliente e entra no escritório
-  const baseCom = rd(sucP + rateavel * n(l.PCT_ESCRITORIO) / 100);
+  const baseCom = escPrevisto(p, l, valor);
   const vEsc = rd(baseCom + tarifa);
-  const vCli = rd(rateavel * n(l.PCT_CLIENTE) / 100 - tarifa);
+  const vCli = rd(valor - baseCom - tarifa);
 
   const lote = [];
   const cpAntigo = (DB.CONTAS_PAGAR||[]).find(c => c.ID === p.CP_ID)
@@ -1877,7 +1986,7 @@ async function conciliarParcela(m, p){
       STATUS:(cpAntigo && cpAntigo.STATUS) || 'Em aberto', DATA_PGTO:(cpAntigo && cpAntigo.DATA_PGTO) || '',
       ORIGEM:'Repasse de parcela', PARCELA_ID:p.ID, ANEXO_URL:(cpAntigo && cpAntigo.ANEXO_URL) || '',
       OBS:'Liberado — crédito de '+moeda(valor)+' conciliado em '+dataBR(m.DATA)
-          +' · '+memoriaRateio(valor, l, tarifa, sucP) })});
+          +' · '+memoriaValores(valor, baseCom, tarifa, sucP) })});
   }
   (DB.REGRAS_COMISSAO||[])
     .filter(r => r.SUBCLASSE && r.SUBCLASSE === l.SUBCLASSE)
@@ -1955,9 +2064,8 @@ async function desfazer(movId){
     if (!confirm('Desfazer? A parcela volta para contas a receber, o repasse ao cliente volta a ficar bloqueado e as comissões geradas são removidas.')) return;
     if (cp){
       const tar = (p.TIPO !== 'Sucumbência' && l.TARIFA_ATIVA !== 'NAO') ? rd(n(l.TARIFA_VALOR) || tarifaPadrao()) : 0;
-      const rate = rd(n(p.VALOR) - (p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA)));
       lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {
-        VENCIMENTO:p.VENCIMENTO, VALOR:rd(rate * n(l.PCT_CLIENTE) / 100 - tar),
+        VENCIMENTO:p.VENCIMENTO, VALOR:rd(n(p.VALOR) - escPrevisto(p, l) - tar),
         STATUS:'Em aberto', DATA_PGTO:'',
         OBS:'Valor previsto sobre a parcela de '+moeda(p.VALOR)+' · '
             +memoriaRateio(n(p.VALOR), l, tar, p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA))
@@ -3107,9 +3215,8 @@ function telaReceber(){
     const l = lancDe(p.LANC_ID);
     return {id:p.ID, tipo:'parcela', pasta:l.PASTA, cliente:l.CLIENTE, proc:l.N_PROCESSO, praca:l.PRACA,
             desc:p.TIPO + (p.NUM>0?' '+p.NUM+'/'+l.QTD_PARCELAS:''), venc:p.VENCIMENTO, valor:n(p.VALOR),
-            cli:rd((n(p.VALOR) - sucDaParcela(p)) * n(l.PCT_CLIENTE)/100 - tarifaDe(p,l)),
-            esc:rd(sucDaParcela(p) + (n(p.VALOR) - sucDaParcela(p)) * n(l.PCT_ESCRITORIO)/100 + tarifaDe(p,l)),
-            lanc:l.ID};
+            cli:rd(n(p.VALOR) - escPrevisto(p, l) - tarifaDe(p,l)),
+            esc:rd(escPrevisto(p, l) + tarifaDe(p,l)), lanc:l.ID};
   });
   (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido').forEach(c =>
     L.push({id:c.ID, tipo:'avulso', pasta:c.PASTA || '—', cliente:c.CLIENTE, proc:'', praca:c.PRACA || '', desc:c.DESCRICAO,
@@ -3675,7 +3782,8 @@ function ajustarOrigemDoRepasse(cp, novoValor){
   const lote = [];
 
   if (p){
-    lote.push({aba:'PARCELAS', registro: Object.assign({}, p, {VALOR_CLIENTE:cli, VALOR_ESCRITORIO:esc})});
+    lote.push({aba:'PARCELAS', registro: Object.assign({}, p, {VALOR_CLIENTE:cli, VALOR_ESCRITORIO:esc,
+      ESC_PREV: String(p.ESC_PREV||'').trim() !== '' ? rd(esc - n(p.TARIFA)) : p.ESC_PREV})});
   } else {
     lote.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, cr, {VALOR_CLIENTE:cli, VALOR_ESCRITORIO:esc})});
   }
@@ -3833,9 +3941,8 @@ function agendadoDRE(mes, grupo){
       const cat = p.TIPO === 'Sucumbência' ? 'Sucumbência' : (l.SUBCLASSE || '—');
       if (!doGrupo(cat)) return;
       const tar = p.STATUS === 'Recebida' ? n(p.TARIFA) : tarifaDe(p, l);
-      const sucP = p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA);
       const esc2 = p.STATUS === 'Recebida' ? rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA))
-                                           : rd(sucP + (n(p.VALOR) - sucP) * n(l.PCT_ESCRITORIO) / 100);
+                                           : escPrevisto(p, l);
       soma(receitas, cat, esc2);
       soma(receitas, 'Tarifas bancárias', tar);
     });
@@ -4047,8 +4154,7 @@ function dreResultado(mes, grupo){
   const d = dadosDRE(mes, grupo);
   const aberto = pendentesReceber();
   const escAberto = aberto.reduce((s,p) => { const l = lancDe(p.LANC_ID);
-    const sp = p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA);
-    return s + rd(sp + (n(p.VALOR) - sp) * n(l.PCT_ESCRITORIO)/100 + tarifaDe(p,l)); }, 0);
+    return s + rd(escPrevisto(p, l) + tarifaDe(p,l)); }, 0);
   const cpAberto = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago').reduce((s,c) => s + n(c.VALOR), 0);
   const pendConc = (DB.EXTRATO||[]).filter(m => m.STATUS !== 'Conciliado').length;
 
@@ -4264,12 +4370,9 @@ function exportarCSV(qual){
     cab = ['Vencimento','Pasta','Cliente','Processo','Descrição','Valor','Cliente R$','Escritório R$'];
     pendentesReceber().sort((a,b)=>String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO))).forEach(p => {
       const l = lancDe(p.LANC_ID);
-      const tf = tarifaDe(p, l);
-      const sp = p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA);
-      const rateavel = rd(n(p.VALOR) - sp);
+      const tf = tarifaDe(p, l), ep = escPrevisto(p, l);
       linhas.push([dataBR(p.VENCIMENTO), l.PASTA, l.CLIENTE, l.N_PROCESSO, p.TIPO+(p.NUM>0?' '+p.NUM:''),
-        nMoeda(p.VALOR), nMoeda(rd(rateavel*n(l.PCT_CLIENTE)/100 - tf)),
-        nMoeda(rd(sp + rateavel*n(l.PCT_ESCRITORIO)/100 + tf))]);
+        nMoeda(p.VALOR), nMoeda(rd(n(p.VALOR) - ep - tf)), nMoeda(rd(ep + tf))]);
     });
   } else if (qual === 'contas-recebidas'){
     cab = ['Crédito','Pasta','Cliente','Descrição','Valor','Cliente','Tarifa','Escritório'];
