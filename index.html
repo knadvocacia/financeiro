@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.5';
+const VERSAO_APP = 'v4.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2333,6 +2333,7 @@ function formImportar(){
     + '<p class="mini" style="margin-top:5px">Cole direto do Excel ou do site do banco. Serve separado por tabulação, ponto e vírgula ou espaços. '
     + 'Valor negativo ou com D no fim é débito. <button class="btn sm sec" onclick="lerColado()">Ler texto colado</button></p></div>'
     + sel('impBanco','Conta bancária deste extrato', opcoesContas(false), FILTROS.fConta || '', '', 'onchange="if(IMP_BRUTO.length)previaImport()"')
+    + '<input type="hidden" id="impTudo" value="">'
     + '<div id="impPrevia"><p class="mini">O sistema lê data, identificação e valor. Movimentos já importados são ignorados automaticamente.</p></div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" id="btnImp" disabled onclick="confirmarImport()">Importar movimentos</button>',
     'larga');
@@ -2459,6 +2460,11 @@ function parseColado(txt){
   return parseTabela(rows);
 }
 
+function alternarConferencia(){
+  const e = document.getElementById('impTudo');
+  if (e) e.value = e.value ? '' : '1';
+  previaImport();
+}
 function previaImport(){
   const linhas = IMP_BRUTO;
   const banco = val('impBanco');
@@ -2466,23 +2472,39 @@ function previaImport(){
     $('#impPrevia').innerHTML = '<div class="erro">Escolha a conta bancária deste extrato.</div>';
     $('#btnImp').disabled = true; return;
   }
-  // a duplicidade é verificada dentro da mesma conta: o mesmo valor pode cair em duas contas no mesmo dia
-  const existentes = new Set((DB.EXTRATO||[]).map(m => m.HASH + '|' + (m.BANCO||'')));
-  const vistos = new Set();
+  // A conferência é por CONTAGEM, não por presença: se a conta já tem 1 movimento
+  // igual e o arquivo traz 3, entram os 2 que faltam. Assim vários lançamentos
+  // idênticos no mesmo dia são importados, e reimportar o mesmo arquivo não duplica.
+  const semConferir = !!val('impTudo');
+  const existentes = {};
+  (DB.EXTRATO||[]).forEach(m => {
+    const k = m.HASH + '|' + (m.BANCO||'');
+    existentes[k] = (existentes[k] || 0) + 1;
+  });
+  const usados = {};
   IMP = [];
   let repetidos = 0;
   linhas.forEach(l => {
     const h = hashMov(l.DATA, l.VALOR, l.IDENTIFICACAO);
     const k = h + '|' + banco;
-    if (existentes.has(k) || vistos.has(k)){ repetidos++; return; }
-    vistos.add(k);
+    usados[k] = (usados[k] || 0) + 1;
+    if (!semConferir && usados[k] <= (existentes[k] || 0)){ repetidos++; return; }
     IMP.push(Object.assign({}, l, {HASH:h}));
   });
   const total = IMP.reduce((s,m) => s + n(m.VALOR), 0);
   $('#impPrevia').innerHTML =
     '<div class="kpis" style="margin:14px 0 10px"><div class="kpi d"><div class="rot">Movimentos novos</div><div class="val">'+IMP.length+'</div></div>'
-    + '<div class="kpi b"><div class="rot">Já importados nesta conta</div><div class="val">'+repetidos+'</div></div>'
+    + '<div class="kpi b"><div class="rot">Já existentes nesta conta</div><div class="val">'+repetidos+'</div></div>'
     + '<div class="kpi p"><div class="rot">Soma</div><div class="val" style="font-size:17px">'+moeda(total)+'</div></div></div>'
+    + '<div class="seg" style="margin-bottom:10px">'
+      + '<button class="'+(semConferir?'on knao':'')+'" onclick="alternarConferencia()">'
+      + (semConferir ? '✓ Importando tudo, sem conferir repetição' : 'Importar tudo, sem conferir repetição') + '</button>'
+      + '</div>'
+    + (repetidos && !semConferir
+        ? '<p class="mini" style="margin-bottom:8px">'+repetidos+' movimento(s) já existem nesta conta com a mesma data, '
+          + 'valor e histórico, e por isso ficaram fora. Se forem lançamentos diferentes que por acaso coincidem, '
+          + 'use o botão acima para importar todos.</p>'
+        : '')
     + '<div class="tw" style="max-height:280px;overflow:auto"><table><thead><tr><th>Data</th><th>Identificação</th><th class="num">Valor</th></tr></thead><tbody>'
     + IMP.slice(0,150).map(m => '<tr><td>'+dataBR(m.DATA)+'</td><td>'+esc(tit(m.IDENTIFICACAO)||'—')+'</td><td class="num '+(n(m.VALOR)<0?'neg':'')+'">'+nMoeda(m.VALOR)+'</td></tr>').join('')
     + '</tbody></table></div>' + (IMP.length > 150 ? '<p class="mini">Mostrando as 150 primeiras linhas.</p>' : '');
