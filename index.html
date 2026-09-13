@@ -278,7 +278,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v5.6';
+const VERSAO_APP = 'v5.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2057,11 +2057,16 @@ function listaPendentes(pend){
       + ladoMovimento(m)
       + '<div class="sugs">' + boxSugestoes(m) + '</div></div></div>').join('')
     + (quantos < L.length
-        ? '<div style="text-align:center;margin:14px 0">'
+        ? '<div style="text-align:center;margin:14px 0;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">'
           + '<button class="btn sec" onclick="setF(\'pendVis\','+(quantos+passo)+')">'
           + 'Mostrar mais ' + Math.min(passo, L.length - quantos)
-          + ' de ' + (L.length - quantos) + ' restantes</button></div>'
-        : '');
+          + ' de ' + (L.length - quantos) + ' restantes</button>'
+          + '<button class="btn sec" onclick="mostrarTodosPendentes('+L.length+')">'
+          + 'Mostrar tudo (' + L.length + ')</button></div>'
+        : (L.length > passo
+            ? '<div style="text-align:center;margin:14px 0">'
+              + '<button class="btn sec" onclick="setF(\'pendVis\','+passo+')">Mostrar menos</button></div>'
+            : ''));
 }
 function ladoMovimento(m, extras){
   return '<div class="lado">'
@@ -2079,6 +2084,12 @@ function ladoMovimento(m, extras){
     + (extras || ('<button class="btn sm sec" onclick="marcarNaoIdentificado(\''+m.ID+'\')">Não identificado</button>'
                 + '<button class="btn sm per" onclick="excluirMov(\''+m.ID+'\')">Excluir</button>'))
     + '</div></div>';
+}
+/* muitos movimentos de uma vez deixam a tela pesada: confirma antes */
+function mostrarTodosPendentes(total){
+  if (total > 120 && !confirm('Mostrar todos os ' + total + ' movimentos de uma vez?\n\n'
+      + 'Cada movimento pesquisa os registros em aberto, então a tela pode demorar alguns segundos para desenhar.')) return;
+  setF('pendVis', total);
 }
 function listaNaoIdentificados(L){
   if (!L.length) return '<div class="card">'+vazio('Nenhum movimento não identificado','Depósitos sem origem aparecem aqui com sugestões de pastas de mesmo valor.')+'</div>';
