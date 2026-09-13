@@ -249,7 +249,6 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
     <div class="campo"><label for="lgUser">Usuário</label><input id="lgUser" autocomplete="username"></div>
     <div class="campo"><label for="lgSenha">Senha</label><input id="lgSenha" type="password" autocomplete="current-password"></div>
     <button class="btn full" onclick="entrar()">Entrar</button>
-    <p class="mini" style="margin-top:14px">Primeiro acesso: <b>admin</b> / <b>admin</b> — troque a senha na engrenagem.</p>
   </div>
 </div>
 
@@ -279,7 +278,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v4.8';
+const VERSAO_APP = 'v5.1';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -406,24 +405,71 @@ async function api(payload){
   }
 }
 async function salvar(aba, reg, silencio){
-  const j = await api({action:'salvar', aba, registro:reg});
-  const lista = DB[aba] || (DB[aba] = []);
-  const i = lista.findIndex(x => x.ID === j.registro.ID);
-  if (i >= 0) lista[i] = j.registro; else lista.push(j.registro);
-  if (!silencio) toast('Salvo na nuvem às ' + NET.ultimo + '.','ok');
-  return j.registro;
+  // senha nova precisa ir pelo caminho antigo, para o servidor gerar o hash
+  if (aba === 'USUARIOS'){
+    const j = await api({action:'salvar', aba, registro:reg});
+    const L = DB[aba] || (DB[aba] = []);
+    const i = L.findIndex(x => x.ID === j.registro.ID);
+    if (i >= 0) L[i] = j.registro; else L.push(j.registro);
+    if (!silencio) toast('Salvo.','ok');
+    return j.registro;
+  }
+  if (!reg.ID) reg.ID = uid();
+  salvarLoteRapido([{aba, registro:reg}]);
+  if (!silencio) toast('Salvo.','ok');
+  return reg;
 }
 async function salvarLote(lote){
   lote.forEach(it => { if (!it.registro.ID) it.registro.ID = uid(); });
-  await api({action:'salvarLote', lote});
+  await api({action:'gravar', lote});
   lote.forEach(it => {
     const lista = DB[it.aba] || (DB[it.aba] = []);
     const i = lista.findIndex(x => x.ID === it.registro.ID);
     if (i >= 0) lista[i] = it.registro; else lista.push(it.registro);
   });
 }
-/* grava aplicando primeiro na tela e depois na nuvem — a interface não trava */
-async function salvarLoteRapido(lote){
+/* ── FILA DE GRAVAÇÃO ──
+   As alterações entram numa fila e sobem juntas num único pedido.
+   O caro é a ida e volta até o Apps Script, não o tamanho do pacote:
+   juntar dez ações numa só chamada corta o tempo quase por dez. */
+let FILA = {lote:[], apagar:[]}, FILA_TIMER = null, FILA_ENVIO = Promise.resolve();
+const FILA_ESPERA = 400, FILA_MAXIMO = 250;
+
+function enfileirar(lote, apagar){
+  FILA.lote = FILA.lote.concat(lote || []);
+  FILA.apagar = FILA.apagar.concat(apagar || []);
+  NET.pendentes = Math.max(1, NET.pendentes); pintarNet();
+  clearTimeout(FILA_TIMER);
+  if (FILA.lote.length + FILA.apagar.length >= FILA_MAXIMO) return descarregarFila();
+  FILA_TIMER = setTimeout(descarregarFila, FILA_ESPERA);
+  return FILA_ENVIO;
+}
+/* o último registro de cada linha vence: editar duas vezes manda só a versão final */
+function compactar(lote){
+  const mapa = new Map();
+  lote.forEach(it => mapa.set(it.aba + '|' + it.registro.ID, it));
+  return [...mapa.values()];
+}
+function descarregarFila(){
+  clearTimeout(FILA_TIMER);
+  if (!FILA.lote.length && !FILA.apagar.length){
+    NET.pendentes = 0; pintarNet();
+    return FILA_ENVIO;
+  }
+  const pacote = {lote: compactar(FILA.lote), apagar: FILA.apagar};
+  FILA = {lote:[], apagar:[]};
+  FILA_ENVIO = FILA_ENVIO.then(async () => {
+    try{
+      await api({action:'gravar', lote:pacote.lote, apagar:pacote.apagar});
+    }catch(e){
+      toast('Não foi possível salvar: ' + e.message + ' — recarregando da nuvem.','erro');
+      await carregar();
+    }
+  });
+  return FILA_ENVIO;
+}
+/* aplica na tela agora e manda para a fila; a interface não espera a nuvem */
+function salvarLoteRapido(lote){
   lote.forEach(it => { if (!it.registro.ID) it.registro.ID = uid(); });
   lote.forEach(it => {
     const L = DB[it.aba] || (DB[it.aba] = []);
@@ -431,14 +477,26 @@ async function salvarLoteRapido(lote){
     if (i >= 0) L[i] = it.registro; else L.push(it.registro);
   });
   render();
-  try{ await api({action:'salvarLote', lote}); }
-  catch(e){ toast('Não foi possível salvar: ' + e.message + ' — recarregando da nuvem.','erro'); await carregar(); throw e; }
+  return enfileirar(lote, []);
 }
+function excluirLoteRapido(apagar){
+  apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
+  render();
+  return enfileirar([], apagar);
+}
+window.addEventListener('beforeunload', e => {
+  if (FILA.lote.length || FILA.apagar.length || NET.pendentes > 0){
+    descarregarFila();
+    e.preventDefault(); e.returnValue = '';
+  }
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden) descarregarFila(); });
 async function excluir(aba, id){
-  await api({action:'excluir', aba, id});
   DB[aba] = (DB[aba]||[]).filter(x => x.ID !== id);
+  return enfileirar([], [{aba, id}]);
 }
 async function carregar(avisar){
+  await descarregarFila();          // nada pendente fica para trás
   carregandoOn('Carregando dados…');
   try{
     const j = await api({action:'carregar'});
@@ -1930,6 +1988,7 @@ function ladoMovimento(m, extras){
     + '<div class="hist" title="'+esc(m.IDENTIFICACAO||'')+'">'+esc(m.IDENTIFICACAO||'—')+'</div>'
     + '<div class="acoes">'
     + '<button class="btn sm sec" onclick="escolherManual(\''+m.ID+'\')">Vincular</button>'
+    + '<button class="btn sm sec" onclick="formVincularVarios(\''+m.ID+'\')">Vincular vários</button>'
     + '<button class="btn sm sec" onclick="formNovoNaConciliacao(\''+m.ID+'\')">'
       + (ehDebito(m) ? 'Nova conta' : 'Novo recebimento') + '</button>'
     + (extras || ('<button class="btn sm sec" onclick="marcarNaoIdentificado(\''+m.ID+'\')">Não identificado</button>'
@@ -1948,21 +2007,33 @@ function listaNaoIdentificados(L){
     + boxSugestoes(m, true, 'Nenhum registro em aberto com esse valor. Assim que o acordo for lançado, a sugestão aparece aqui.')
     + '</div></div></div>').join('');
 }
-/* descreve o destino de um movimento já conciliado */
-function alvoDe(mov){
-  const id = mov.PARCELA_ID;
+/* descreve o destino de um movimento já conciliado; um movimento pode ter vários */
+function alvoUnico(id){
   const p = parcDe(id);
   if (p){ const l = lancDe(p.LANC_ID);
-    return {tipo:'parcela', p, l, quem:pastaCliente(l.PASTA, l.CLIENTE),
+    return {tipo:'parcela', id, p, l, quem:pastaCliente(l.PASTA, l.CLIENTE),
+            resumo:(l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—'),
             cli:n(p.VALOR_CLIENTE), esc:n(p.VALOR_ESCRITORIO)}; }
   const cp = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id);
-  if (cp) return {tipo:'pagar', cp, quem:'<b>'+esc(cp.FAVORECIDO||cp.DESCRICAO||'—')+'</b>'
-            + '<div class="mini">'+esc(cp.CATEGORIA||'')+'</div>', cli:0, esc:0};
+  if (cp) return {tipo:'pagar', id, cp, quem:'<b>'+esc(cp.FAVORECIDO||cp.DESCRICAO||'—')+'</b>'
+            + '<div class="mini">'+esc(cp.CATEGORIA||'')+'</div>',
+            resumo:(cp.FAVORECIDO || cp.DESCRICAO || '—'), cli:0, esc:0};
   const cr = (DB.CONTAS_RECEBER||[]).find(x => x.ID === id);
-  if (cr) return {tipo:'receber', cr,
+  if (cr) return {tipo:'receber', id, cr,
     quem: cr.PASTA ? pastaCliente(cr.PASTA, cr.CLIENTE) : '<b>'+esc(cr.CLIENTE||cr.DESCRICAO||'—')+'</b>',
+    resumo:(cr.CLIENTE || cr.DESCRICAO || '—'),
     cli:n(cr.VALOR_CLIENTE), esc:n(cr.VALOR_ESCRITORIO) || n(cr.VALOR)};
-  return {tipo:'', quem:'<span class="mini">—</span>', cli:0, esc:0};
+  return {tipo:'', id, quem:'<span class="mini">—</span>', resumo:'—', cli:0, esc:0};
+}
+const idsDoMov = m => String((m && m.PARCELA_ID) || '').split('|').filter(Boolean);
+function alvosDe(m){ return idsDoMov(m).map(alvoUnico); }
+function alvoDe(mov){
+  const L = alvosDe(mov);
+  if (!L.length) return {tipo:'', quem:'<span class="mini">—</span>', cli:0, esc:0, itens:[]};
+  if (L.length === 1) return Object.assign({}, L[0], {itens:L});
+  return {tipo:'varios', itens:L,
+    quem:'<b>'+L.length+' registros</b><div class="mini">'+esc(L.map(a => a.resumo).join(' · '))+'</div>',
+    cli:rd(L.reduce((s,a) => s + n(a.cli), 0)), esc:rd(L.reduce((s,a) => s + n(a.esc), 0))};
 }
 function listaConciliados(L){
   const t = (FILTROS.busca||'').toLowerCase();
@@ -2019,26 +2090,17 @@ function listaDivergencias(dup){
 }
 
 /* ── Conciliar ── */
-async function conciliar(movId, alvoId){
-  const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
-  if (!m) return toast('Movimento não encontrado.','erro');
-  const p = parcDe(alvoId);
-  const cp = (DB.CONTAS_PAGAR||[]).find(x => x.ID === alvoId);
-  const cr = (DB.CONTAS_RECEBER||[]).find(x => x.ID === alvoId);
-  if (p) return conciliarParcela(m, p);
-  if (cp) return conciliarPagamento(m, cp);
-  if (cr) return conciliarRecebimento(m, cr);
-  toast('Registro de destino não encontrado.','erro');
-}
+/* ══════════════════ CONCILIAR ══════════════════
+   Um movimento pode ser conciliado com um registro ou com vários.
+   Cada rotina abaixo monta o que precisa ser gravado; quem chama junta tudo
+   num único lote, para o extrato e os destinos irem para a nuvem de uma vez. */
 
-async function conciliarParcela(m, p){
+function loteParcela(m, p, valor){
   const l = lancDe(p.LANC_ID);
-  const valor = Math.abs(n(m.VALOR));
   const suc = p.TIPO === 'Sucumbência';
-  const sucP = suc ? valor : sucDaParcela(p, valor);          // fatia de sucumbência desta parcela
+  const sucP = suc ? valor : sucDaParcela(p, valor);
   const tarifa = (!suc && l.TARIFA_ATIVA !== 'NAO') ? rd(n(l.TARIFA_VALOR) || tarifaPadrao()) : 0;
-  // base de comissão = parte do escritório SEM a tarifa; a tarifa sai do cliente e entra no escritório
-  const baseCom = escPrevisto(p, l, valor);
+  const baseCom = escPrevisto(p, l, valor);          // parte do escritório, sem a tarifa
   const vEsc = rd(baseCom + tarifa);
   const vCli = rd(valor - baseCom - tarifa);
 
@@ -2050,10 +2112,8 @@ async function conciliarParcela(m, p){
   lote.push({aba:'PARCELAS', registro: Object.assign({}, p, {
     STATUS:'Recebida', DATA_CREDITO:m.DATA, VALOR_CREDITADO:valor, MOV_ID:m.ID,
     VALOR_CLIENTE:vCli, VALOR_ESCRITORIO:vEsc, TARIFA:tarifa, CP_ID:cpId })});
-  lote.push({aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Conciliado', PARCELA_ID:p.ID})});
 
   if (vCli > 0){
-    // o repasse já existe desde o lançamento: aqui ele é liberado e ajustado ao valor creditado
     lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cpAntigo || {}, {
       ID:cpId, DESCRICAO:(cpAntigo && cpAntigo.DESCRICAO) || ('Repasse ao cliente — pasta '+(l.PASTA||'—')+(p.NUM>0?' · parcela '+p.NUM:'')),
       FAVORECIDO:l.CLIENTE||'', CATEGORIA:'Repasse a cliente', VENCIMENTO:m.DATA, VALOR:vCli,
@@ -2066,47 +2126,35 @@ async function conciliarParcela(m, p){
     .filter(r => r.SUBCLASSE && r.SUBCLASSE === l.SUBCLASSE)
     .filter(r => regraCobrePraca(r, l.PRACA))
     .forEach(r => {
-      // base própria: % fixo do crédito, independente do rateio do processo
       const base = n(r.PCT_BASE) > 0 ? rd(valor * n(r.PCT_BASE) / 100) : baseCom;
       const pctAplicado = pctDaRegra(r, l.EXEC === 'SIM');
       const v = rd(base * pctAplicado / 100);
       if (v <= 0) return;
       lote.push({aba:'COMISSOES', registro:{ ID:uid('co'), PARCELA_ID:p.ID, LANC_ID:l.ID, CLIENTE:l.CLIENTE||'',
-        COMISSIONADO_ID:r.COMISSIONADO_ID, BASE:base, PCT:pctAplicado, VALOR:v, STATUS:'A pagar', DATA:m.DATA, CP_ID:'' }});
+        COMISSIONADO_ID:r.COMISSIONADO_ID, BASE:base, PCT:pctAplicado, VALOR:v,
+        STATUS:'A pagar', DATA:m.DATA, CP_ID:'' }});
     });
-
-  try{
-    await salvarLoteRapido(lote);
-    toast('Recebimento conciliado e salvo. ' + (vCli > 0 ? moeda(vCli)+' liberado para o cliente · '+moeda(vEsc)+' para o escritório.'
-                                                         : 'Valor integral do escritório.'), 'ok');
-  }catch(e){}
+  return {lote, resumo: vCli > 0 ? moeda(vCli)+' para o cliente · '+moeda(vEsc)+' para o escritório'
+                                 : 'valor integral do escritório'};
 }
 
-async function conciliarPagamento(m, cp){
+function lotePagamento(m, cp, valor){
   if (liberacao(cp).tipo === 'nao')
-    return toast('A parcela deste cliente ainda não foi conciliada. Concilie o crédito antes de baixar o pagamento.','erro');
-  const valor = Math.abs(n(m.VALOR));
-  const lote = [
-    {aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {STATUS:'Pago', DATA_PGTO:m.DATA, VALOR:valor,
-      OBS:'Pago pelo débito de '+moeda(valor)+' conciliado em '+dataBR(m.DATA)})},
-    {aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Conciliado', PARCELA_ID:cp.ID})}
-  ];
+    return {erro:'A parcela de "'+(cp.FAVORECIDO||cp.DESCRICAO||'—')+'" ainda não foi conciliada. Concilie o crédito antes de baixar o pagamento.'};
+  const lote = [{aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {STATUS:'Pago', DATA_PGTO:m.DATA, VALOR:valor,
+    OBS:'Pago pelo débito de '+moeda(valor)+' conciliado em '+dataBR(m.DATA)})}];
   (DB.COMISSOES||[]).filter(c => c.CP_ID === cp.ID).forEach(c =>
     lote.push({aba:'COMISSOES', registro: Object.assign({}, c, {STATUS:'Paga'})}));
-  try{ await salvarLoteRapido(lote); toast('Pagamento de '+moeda(valor)+' baixado e salvo.','ok'); }catch(e){}
+  return {lote, resumo:'pagamento de '+moeda(valor)+' baixado'};
 }
 
-async function conciliarRecebimento(m, cr){
-  const valor = Math.abs(n(m.VALOR));
-  const lote = [
-    {aba:'CONTAS_RECEBER', registro: Object.assign({}, cr, {STATUS:'Recebido', DATA_RECEB:m.DATA, VALOR:valor,
-      OBS:'Recebido pelo crédito conciliado em '+dataBR(m.DATA)})},
-    {aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Conciliado', PARCELA_ID:cr.ID})}
-  ];
-  comissoesDoRecebimento(cr, valor, m.DATA).forEach(c => lote.push(c));
-  try{ await salvarLoteRapido(lote); toast('Recebimento de '+moeda(valor)+' conciliado e salvo.','ok'); }catch(e){}
+function loteRecebimento(m, cr, valor){
+  const lote = [{aba:'CONTAS_RECEBER', registro: Object.assign({}, cr, {STATUS:'Recebido', DATA_RECEB:m.DATA, VALOR:valor,
+    OBS:'Recebido pelo crédito conciliado em '+dataBR(m.DATA)})}];
+  comissoesDoRecebimento(Object.assign({}, cr, {VALOR:valor}), valor, m.DATA).forEach(c => lote.push(c));
+  return {lote, resumo:'recebimento de '+moeda(valor)+' conciliado'};
 }
-/* comissões do recebimento avulso: mesmas regras das parcelas — categoria, praça e o % próprio da EXEC */
+/* comissões do recebimento avulso: mesmas regras das parcelas */
 function comissoesDoRecebimento(cr, valor, data){
   const baseCom = rd((n(cr.VALOR_ESCRITORIO) || 0) - n(cr.TARIFA));
   if (baseCom <= 0) return [];
@@ -2124,26 +2172,140 @@ function comissoesDoRecebimento(cr, valor, data){
     }).filter(Boolean);
 }
 
-/* ── Desfazer ── */
-async function desfazer(movId){
-  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
-  const a = alvoDe(m);
-  const apagar = [], lote = [];
+/* monta o que gravar para um destino, seja ele parcela, recebimento ou conta a pagar */
+function loteDoAlvo(m, alvoId, valor){
+  const p = parcDe(alvoId);
+  if (p) return loteParcela(m, p, valor);
+  const cp = (DB.CONTAS_PAGAR||[]).find(x => x.ID === alvoId);
+  if (cp) return lotePagamento(m, cp, valor);
+  const cr = (DB.CONTAS_RECEBER||[]).find(x => x.ID === alvoId);
+  if (cr) return loteRecebimento(m, cr, valor);
+  return {erro:'Registro de destino não encontrado.'};
+}
 
+async function conciliar(movId, alvoId){
+  return conciliarVarios(movId, [{id:alvoId, valor:Math.abs(n((DB.EXTRATO||[]).find(x => x.ID === movId) || {}).VALOR)}]);
+}
+
+async function conciliarVarios(movId, itens){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
+  if (!m) return toast('Movimento não encontrado.','erro');
+  const total = rd(Math.abs(n(m.VALOR)));
+  const sel = (itens||[]).filter(x => x.id && rd(n(x.valor)) > 0);
+  if (!sel.length) return toast('Escolha ao menos um registro com valor.','erro');
+  const soma = rd(sel.reduce((s,x) => s + rd(n(x.valor)), 0));
+  if (Math.abs(soma - total) > 0.01)
+    return toast('A soma dos vínculos ('+moeda(soma)+') precisa fechar com o movimento ('+moeda(total)+').','erro');
+
+  let lote = [], resumos = [];
+  for (const x of sel){
+    const r = loteDoAlvo(m, x.id, rd(n(x.valor)));
+    if (r.erro) return toast(r.erro,'erro');
+    lote = lote.concat(r.lote);
+    resumos.push(r.resumo);
+  }
+  lote.push({aba:'EXTRATO', registro: Object.assign({}, m,
+    {STATUS:'Conciliado', PARCELA_ID: sel.map(x => x.id).join('|')})});
+
+  try{
+    await salvarLoteRapido(lote);
+    toast(sel.length > 1
+      ? 'Movimento conciliado com ' + sel.length + ' registros.'
+      : 'Conciliado — ' + resumos[0] + '.', 'ok');
+  }catch(e){}
+}
+
+/* ── Vincular vários registros a um movimento ── */
+let VINC = {};
+function formVincularVarios(movId){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const deb = ehDebito(m);
+  const cands = (deb ? candidatosDebito() : candidatosCredito())
+    .sort((a,b) => String(a.venc).localeCompare(String(b.venc)));
+  if (!cands.length) return toast(deb ? 'Não há contas a pagar liberadas para vincular.' : 'Não há registros em aberto para vincular.','erro');
+  VINC = {};
+  modal('Vincular vários registros — ' + moeda(m.VALOR),
+    '<p class="mini" style="margin-bottom:12px">Movimento de <b>'+moeda(m.VALOR)+'</b> em '+dataBR(m.DATA)
+    + (m.BANCO ? ' · '+esc(m.BANCO) : '') + ' — '+esc(m.IDENTIFICACAO||'')+'</p>'
+    + '<div class="filtros">' + campoTexto('vincBusca','Buscar','cliente, pasta, favorecido…') + '</div>'
+    + '<div id="boxVinc"></div>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn ok" onclick="confirmarVinculos(\'' + movId + '\')">Conciliar selecionados</button>', 'larga');
+  pintarVinculos(movId);
+}
+function pintarVinculos(movId){
+  const box = document.getElementById('boxVinc'); if (!box) return;
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
+  const total = rd(Math.abs(n(m.VALOR)));
+  const termo = (FILTROS.vincBusca || '').toLowerCase();
+  const cands = (ehDebito(m) ? candidatosDebito() : candidatosCredito())
+    .filter(c => !termo || (c.titulo + ' ' + c.detalhe + ' ' + c.sub).toLowerCase().includes(termo))
+    .sort((a,b) => String(a.venc).localeCompare(String(b.venc)));
+  const soma = rd(Object.keys(VINC).reduce((s,k) => s + rd(n(VINC[k])), 0));
+  const falta = rd(total - soma);
+
+  box.innerHTML = '<div class="tw" style="max-height:340px;overflow:auto"><table class="densa">'
+    + '<thead><tr><th style="width:34px"></th><th>Registro</th><th>Vencimento</th>'
+    + '<th class="num">Em aberto</th><th class="num">Valor a usar</th></tr></thead><tbody>'
+    + cands.map(c => {
+        const marcado = VINC[c.id] !== undefined;
+        return '<tr'+(marcado ? ' class="sel"' : '')+'>'
+          + '<td><input type="checkbox" '+(marcado?'checked':'')
+            + ' style="width:16px;height:16px;accent-color:var(--brand)"'
+            + ' onchange="marcarVinculo(\'' + movId + '\',\'' + c.id + '\',this.checked,' + c.valor + ')"></td>'
+          + '<td><b>'+esc(c.titulo)+'</b><div class="mini">'+esc(c.sub + (c.detalhe ? ' · ' + c.detalhe : ''))+'</div></td>'
+          + '<td>'+dataBR(c.venc)+'</td>'
+          + '<td class="num">'+nMoeda(c.valor)+'</td>'
+          + '<td class="num">' + (marcado
+              ? '<input value="'+nMoeda(VINC[c.id])+'" oninput="VINC[\'' + c.id + '\']=n(this.value)"'
+                + ' onblur="pintarVinculos(\'' + movId + '\')"'
+                + ' style="width:110px;text-align:right;padding:3px 6px;border:1px solid var(--line);border-radius:4px;'
+                + 'font-family:\'IBM Plex Mono\',monospace">'
+              : '<span class="mini">—</span>') + '</td></tr>';
+      }).join('')
+    + '</tbody></table></div>'
+    + '<div class="barraSel" style="margin-top:12px"><b>'+Object.keys(VINC).length+'</b> selecionado(s) · '
+    + 'soma ' + moeda(soma) + ' de ' + moeda(total)
+    + (Math.abs(falta) < 0.01 ? ' · <span class="pos">fecha certo</span>'
+       : falta > 0 ? ' · <span class="neg">faltam ' + moeda(falta) + '</span>'
+                   : ' · <span class="neg">passou ' + moeda(-falta) + '</span>')
+    + '<span style="flex:1"></span>'
+    + '<button class="btn sm sec" onclick="VINC={};pintarVinculos(\'' + movId + '\')">Limpar</button></div>';
+}
+function marcarVinculo(movId, id, marcado, aberto){
+  if (!marcado){ delete VINC[id]; }
+  else {
+    const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
+    const total = rd(Math.abs(n(m.VALOR)));
+    const usado = rd(Object.keys(VINC).reduce((s,k) => s + rd(n(VINC[k])), 0));
+    const falta = rd(total - usado);
+    VINC[id] = rd(Math.min(n(aberto), falta > 0 ? falta : n(aberto)));   // sugere o que falta
+  }
+  pintarVinculos(movId);
+}
+function confirmarVinculos(movId){
+  const itens = Object.keys(VINC).map(id => ({id, valor:VINC[id]}));
+  fecharModal();
+  return conciliarVarios(movId, itens);
+}
+
+/* ── Desfazer ── */
+function reverterAlvo(a){
+  const lote = [], apagar = [];
   if (a.tipo === 'parcela'){
     const p = a.p, l = a.l;
     const cp = (DB.CONTAS_PAGAR||[]).find(c => c.ID === p.CP_ID || (c.PARCELA_ID === p.ID && c.CATEGORIA === 'Repasse a cliente'));
     if (cp && cp.STATUS === 'Pago')
-      return toast('O repasse ao cliente já foi pago. Desfaça primeiro a conciliação desse pagamento.','erro');
-    if (!confirm('Desfazer? A parcela volta para contas a receber, o repasse ao cliente volta a ficar bloqueado e as comissões geradas são removidas.')) return;
+      return {erro:'O repasse ao cliente de "'+(l.CLIENTE||'')+'" já foi pago. Desfaça primeiro a conciliação desse pagamento.'};
     if (cp){
       const tar = (p.TIPO !== 'Sucumbência' && l.TARIFA_ATIVA !== 'NAO') ? rd(n(l.TARIFA_VALOR) || tarifaPadrao()) : 0;
       lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {
         VENCIMENTO:p.VENCIMENTO, VALOR:rd(n(p.VALOR) - escPrevisto(p, l) - tar),
         STATUS:'Em aberto', DATA_PGTO:'',
         OBS:'Valor previsto sobre a parcela de '+moeda(p.VALOR)+' · '
-            +memoriaRateio(n(p.VALOR), l, tar, p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA))
-            +' · aguardando o crédito da parcela' })});
+            + memoriaValores(n(p.VALOR), escPrevisto(p, l), tar,
+                p.TIPO === 'Sucumbência' ? n(p.VALOR) : n(p.SUCUMBENCIA))
+            + ' · aguardando o crédito da parcela' })});
     }
     (DB.COMISSOES||[]).filter(c => c.PARCELA_ID === p.ID && c.STATUS !== 'Paga')
       .forEach(c => apagar.push({aba:'COMISSOES', id:c.ID}));
@@ -2151,30 +2313,46 @@ async function desfazer(movId){
       MOV_ID:'', VALOR_CLIENTE:'', VALOR_ESCRITORIO:'', TARIFA:''})});
 
   } else if (a.tipo === 'pagar'){
-    if (!confirm('Desfazer a baixa deste pagamento? A conta volta para "em aberto".')) return;
     lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, a.cp, {STATUS:'Em aberto', DATA_PGTO:'',
       OBS:'Baixa desfeita em '+dataBR(hoje())})});
     (DB.COMISSOES||[]).filter(c => c.CP_ID === a.cp.ID).forEach(c =>
       lote.push({aba:'COMISSOES', registro: Object.assign({}, c, {STATUS:'Enviada'})}));
 
   } else if (a.tipo === 'receber'){
-    if (!confirm('Desfazer? A conta volta para contas a receber e as comissões geradas são removidas.')) return;
     lote.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, a.cr, {STATUS:'Em aberto', DATA_RECEB:''})});
     (DB.COMISSOES||[]).filter(c => c.PARCELA_ID === a.cr.ID && c.STATUS !== 'Paga')
       .forEach(c => apagar.push({aba:'COMISSOES', id:c.ID}));
-
-  } else if (!confirm('Este movimento não aponta para nenhum registro. Voltar para pendentes?')) return;
-
-  lote.push({aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Pendente', PARCELA_ID:''})});
-  try{
-    if (apagar.length){
-      apagar.forEach(x => { DB[x.aba] = (DB[x.aba]||[]).filter(y => y.ID !== x.id); });
-      await api({action:'excluirLote', lote:apagar});
-    }
-    await salvarLoteRapido(lote);
-    toast('Conciliação desfeita.','ok');
-  }catch(e){}
+  }
+  return {lote, apagar};
 }
+
+async function desfazer(movId){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const alvos = alvosDe(m);
+  const quantos = alvos.length;
+  if (!confirm(quantos > 1
+      ? 'Desfazer a conciliação deste movimento com ' + quantos + ' registros? Todos voltam ao estado anterior.'
+      : 'Desfazer? O registro volta ao estado anterior e as comissões geradas são removidas.')) return;
+
+  let lote = [], apagar = [];
+  for (const a of alvos){
+    const r = reverterAlvo(a);
+    if (r.erro) return toast(r.erro,'erro');
+    lote = lote.concat(r.lote); apagar = apagar.concat(r.apagar);
+  }
+  lote.push({aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Pendente', PARCELA_ID:''})});
+  apagar.forEach(x => { DB[x.aba] = (DB[x.aba]||[]).filter(y => y.ID !== x.id); });
+  lote.forEach(it => {
+    const L = DB[it.aba] || (DB[it.aba] = []);
+    const j = L.findIndex(x => x.ID === it.registro.ID);
+    if (j >= 0) L[j] = it.registro; else L.push(it.registro);
+  });
+  render();
+  enfileirar(lote, apagar);
+  toast('Conciliação desfeita.','ok');
+}
+
+
 
 async function marcarNaoIdentificado(id){
   const m = (DB.EXTRATO||[]).find(x => x.ID === id); if (!m) return;
@@ -2493,17 +2671,10 @@ async function excluirImportacao(chave){
   if (g.conciliados)
     return toast('Esta importação tem '+g.conciliados+' movimento(s) já conciliado(s). Desfaça a conciliação deles antes de excluir.','erro');
   if (!confirm('Excluir a importação de "'+(g.arquivo || 'arquivo anterior')+'" e seus '+g.movs.length+' movimento(s)?')) return;
-  carregandoOn('Excluindo importação…');
-  try{
-    const ids = g.movs.map(m => m.ID);
-    for (let i=0;i<ids.length;i+=200){
-      await api({action:'excluirLote', lote: ids.slice(i,i+200).map(id => ({aba:'EXTRATO', id}))});
-    }
-    const set = new Set(ids);
-    DB.EXTRATO = (DB.EXTRATO||[]).filter(m => !set.has(m.ID));
-    render(); historicoImportacoes();
-    toast(ids.length + ' movimento(s) excluído(s).','ok');
-  }catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
+  const ids = g.movs.map(m => m.ID);
+  excluirLoteRapido(ids.map(id => ({aba:'EXTRATO', id})));
+  historicoImportacoes();
+  toast(ids.length + ' movimento(s) excluído(s).','ok');
 }
 
 const hashMov = (d,v,desc) => String(d)+'|'+rd(v)+'|'+String(desc||'').replace(/\s+/g,' ').trim().toUpperCase().slice(0,60);
@@ -2843,9 +3014,9 @@ async function confirmarImportCP(){
       ID:uid('cp'), DESCRICAO:l.DESCRICAO, FAVORECIDO:l.FAVORECIDO, CATEGORIA:l.CATEGORIA,
       VENCIMENTO:l.VENCIMENTO || hoje(), VALOR:l.VALOR, STATUS:'Em aberto', DATA_PGTO:'',
       ORIGEM:'Importada de planilha', PARCELA_ID:'', ANEXO_URL:'', OBS:l.OBS }}));
-    for (let i=0;i<lote.length;i+=300){
-      carregandoOn('Importando… ' + Math.min(i+300, lote.length) + ' de ' + lote.length);
-      await salvarLote(lote.slice(i, i+300));
+    for (let i=0;i<lote.length;i+=500){
+      carregandoOn('Importando… ' + Math.min(i+500, lote.length) + ' de ' + lote.length);
+      await salvarLote(lote.slice(i, i+500));
     }
     fecharModal(); ABA = 'pagar'; render();
     toast(IMPCP.length + ' conta(s) importada(s).','ok');
@@ -3232,17 +3403,17 @@ async function excluirComRetorno(refs, rotulo, opcoes){
   const qtdMov = plano.movs.length;
   if (!confirm('Excluir ' + (rotulo || plano.apagar.length + ' registro(s)') + '?'
       + (qtdMov ? '\n\n' + qtdMov + ' movimento(s) do extrato voltam para a conciliação, prontos para serem conciliados de novo.' : ''))) return;
-  carregandoOn('Excluindo…');
-  try{
-    if (plano.atualizar.length) await salvarLoteRapido(plano.atualizar);
-    for (let i=0;i<plano.apagar.length;i+=150){
-      await api({action:'excluirLote', lote: plano.apagar.slice(i, i+150)});
-    }
-    plano.apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
-    SELR = new Set();
-    render();
-    toast('Excluído.' + (qtdMov ? ' ' + qtdMov + ' movimento(s) voltaram para a conciliação.' : ''), 'ok');
-  }catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
+  // exclusão e atualizações vão juntas num pacote só
+  plano.apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
+  plano.atualizar.forEach(it => {
+    const L = DB[it.aba] || (DB[it.aba] = []);
+    const j = L.findIndex(x => x.ID === it.registro.ID);
+    if (j >= 0) L[j] = it.registro; else L.push(it.registro);
+  });
+  SELR = new Set();
+  render();
+  enfileirar(plano.atualizar, plano.apagar);
+  toast('Excluído.' + (qtdMov ? ' ' + qtdMov + ' movimento(s) voltaram para a conciliação.' : ''), 'ok');
 }
 
 /* seleção múltipla em contas a receber */
@@ -4786,22 +4957,19 @@ async function executarLimpezaOrfaos(){
   fecharModal();
   carregandoOn('Limpando a base…');
   try{
-    for (let i = 0; i < p.atualizar.length; i += 200){
-      await salvarLote(p.atualizar.slice(i, i+200));
-    }
     p.atualizar.forEach(it => {
       const L = DB[it.aba] || [];
       const j = L.findIndex(x => x.ID === it.registro.ID);
       if (j >= 0) L[j] = it.registro;
     });
-    for (let i = 0; i < p.apagar.length; i += 150){
-      carregandoOn('Limpando… ' + Math.min(i+150, p.apagar.length) + ' de ' + p.apagar.length);
-      await api({action:'excluirLote', lote: p.apagar.slice(i, i+150)});
-    }
     p.apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
     render();
+    const passos = Math.max(p.atualizar.length, p.apagar.length);
+    for (let i = 0; i < passos; i += 300){
+      await api({action:'gravar', lote: p.atualizar.slice(i, i+300), apagar: p.apagar.slice(i, i+300)});
+    }
     toast(p.apagar.length + ' registro(s) órfão(s) removido(s).','ok');
-  }catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
+  }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
 }
 
 </script>
