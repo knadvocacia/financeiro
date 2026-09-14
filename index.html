@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v6.0';
+const VERSAO_APP = 'v6.1';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2464,6 +2464,57 @@ function confirmarVinculos(movId){
   return conciliarVarios(movId, itens);
 }
 
+/* Vincula um registro. Se o valor não bater com o extrato, pergunta se o
+   registro deve passar a valer o que realmente caiu na conta. */
+function vincularUm(movId, alvoId, valorRegistro){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const mov = rd(Math.abs(n(m.VALOR)));
+  const reg = rd(n(valorRegistro));
+  if (Math.abs(mov - reg) <= 0.01){ fecharModal(); return conciliar(movId, alvoId); }
+
+  const dif = rd(mov - reg);
+  modal('Valores diferentes',
+    '<p>O registro está lançado com <b>'+moeda(reg)+'</b> e o extrato traz <b>'+moeda(mov)+'</b>'
+    + ' — uma diferença de <b class="'+(dif>0?'pos':'neg')+'">'+moeda(Math.abs(dif))+'</b>'
+    + (dif > 0 ? ' a mais' : ' a menos') + '.</p>'
+    + '<p style="margin-top:10px">Deseja alterar o valor do registro para o valor do extrato e conciliar?</p>'
+    + '<p class="mini" style="margin-top:10px">Alterando, o rateio entre cliente e escritório é recalculado na mesma '
+    + 'proporção. Mantendo, o registro fica com o valor lançado e a conciliação usa o valor do extrato.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn sec" onclick="fecharModal();conciliar(\''+movId+'\',\''+alvoId+'\')">Manter '+moeda(reg)+'</button>'
+    + '<button class="btn ok" onclick="fecharModal();ajustarEConciliar(\''+movId+'\',\''+alvoId+'\')">'
+    + 'Sim, usar '+moeda(mov)+'</button>', 'estreita');
+}
+async function ajustarEConciliar(movId, alvoId){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const novo = rd(Math.abs(n(m.VALOR)));
+  const lote = [];
+  const escala = (v, f) => String(v == null ? '' : v).trim() === '' ? v : rd(n(v) * f);
+
+  const p = parcDe(alvoId);
+  if (p){
+    const antigo = n(p.VALOR) || novo;
+    const f = antigo ? novo / antigo : 1;
+    lote.push({aba:'PARCELAS', registro: Object.assign({}, p, {
+      VALOR: novo, ESC_PREV: escala(p.ESC_PREV, f), SUCUMBENCIA: escala(p.SUCUMBENCIA, f) })});
+  } else {
+    const cr = indices().cr.get(alvoId);
+    if (cr){
+      const antigo = n(cr.VALOR) || novo;
+      const f = antigo ? novo / antigo : 1;
+      lote.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, cr, {
+        VALOR: novo, VALOR_ESCRITORIO: escala(cr.VALOR_ESCRITORIO, f),
+        VALOR_CLIENTE: escala(cr.VALOR_CLIENTE, f) })});
+    } else {
+      const cp = indices().cp.get(alvoId);
+      if (cp) lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {VALOR: novo})});
+    }
+  }
+  if (lote.length) salvarLoteRapido(lote);   // o registro já fica com o valor novo
+  toast('Valor do registro ajustado para ' + moeda(novo) + '.','ok');
+  return conciliar(movId, alvoId);
+}
+
 /* ── Desfazer ── */
 function reverterAlvo(a){
   const lote = [], apagar = [];
@@ -2621,7 +2672,7 @@ function pintarVinculoUm(movId){
       + '<td class="num">'+nMoeda(c.valor)
         + (Math.abs(c.valor - alvo) <= 0.01 ? '<div class="mini pos">valor idêntico</div>' : '')+'</td>'
       + '<td style="text-align:right"><button class="btn sm ok" '
-        + 'onclick="fecharModal();conciliar(\''+movId+'\',\''+c.id+'\')">Vincular</button></td></tr>').join('')
+        + 'onclick="vincularUm(\''+movId+'\',\''+c.id+'\','+c.valor+')">Vincular</button></td></tr>').join('')
     + '</tbody></table></div>'
     + '<p class="mini" style="margin-top:6px">'
     + (todos.length > L.length ? 'Mostrando 60 de ' + todos.length + ' — refine a busca. ' : '')
