@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v6.2';
+const VERSAO_APP = 'v6.4';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -387,6 +387,7 @@ window.addEventListener('online', () => { NET.erro = ''; pintarNet(); toast('Con
 window.addEventListener('offline', () => { pintarNet(); toast('Você está offline. Nada será salvo até a conexão voltar.','erro'); });
 const agoraHM = () => new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
 async function salvarAgora(){
+  FILA_FALHAS = 0;
   const pend = FILA.lote.length + FILA.apagar.length + (EM_VOO ? 1 : 0);
   await descarregarFila();
   await FILA_ENVIO;
@@ -414,11 +415,7 @@ async function api(payload){
         const txt = await r.text();
         let j;
         try{ j = JSON.parse(txt); }
-        catch(err){
-          throw new Error(/^\s*</.test(txt)
-            ? 'o Google devolveu uma página de erro em vez dos dados. Confira a implantação do Apps Script — em "Quem tem acesso" precisa estar "Qualquer pessoa".'
-            : 'resposta inesperada do servidor.');
-        }
+        catch(err){ throw new Error(diagnosticoResposta(r, txt)); }
         if (!j.ok) throw new Error(j.erro || 'Falha na comunicação com o servidor.');
         if (escrita){ NET.erro = ''; NET.ultimo = agoraHM(); }
         return j;
@@ -435,6 +432,26 @@ async function api(payload){
     if (escrita){ NET.pendentes = Math.max(0, NET.pendentes - 1); pintarNet(); }
   }
 }
+/* traduz a resposta que não é JSON no motivo mais provável */
+function diagnosticoResposta(r, txt){
+  const t = String(txt||'');
+  const baixo = t.toLowerCase();
+  if (r && r.status === 401) return 'o Google pediu login (401). Reimplante o app com "Quem tem acesso: Qualquer pessoa".';
+  if (r && r.status === 403) return 'acesso negado pelo Google (403). Em "Quem tem acesso" precisa estar "Qualquer pessoa".';
+  if (r && r.status >= 500) return 'o Google respondeu com erro ' + r.status + '. Costuma ser instabilidade momentânea — tente salvar de novo em instantes.';
+  if (baixo.includes('accounts.google') || baixo.includes('sign in') || baixo.includes('fazer login'))
+    return 'o Google devolveu a tela de login. A implantação está restrita: reimplante com "Quem tem acesso: Qualquer pessoa".';
+  if (baixo.includes('exceeded') || baixo.includes('quota') || baixo.includes('limite'))
+    return 'a cota do Apps Script foi atingida. Aguarde alguns minutos e salve de novo.';
+  if (baixo.includes('script function not found') || baixo.includes('doget') || baixo.includes('dopost'))
+    return 'a implantação não está publicada como App da Web. Reimplante em Implantar → Nova implantação → App da Web.';
+  if (baixo.includes('erro') && baixo.includes('script'))
+    return 'o Apps Script devolveu um erro de execução. Abra o editor, em Execuções, para ver a mensagem.';
+  if (/^\s*</.test(t)) return 'o Google devolveu uma página HTML em vez dos dados (status ' + ((r&&r.status)||'?')
+    + '). Use "Testar conexão" em Configurações → Geral para ver o detalhe.';
+  return 'resposta inesperada do servidor (status ' + ((r&&r.status)||'?') + ').';
+}
+
 /* busca uma aba inteira, quando a tela precisa do histórico completo */
 async function carregarAba(aba){
   const j = await api({action:'carregarAba', aba});
@@ -472,7 +489,7 @@ async function salvarLote(lote){
    As alterações entram numa fila e sobem juntas num único pedido.
    O caro é a ida e volta até o Apps Script, não o tamanho do pacote:
    juntar dez ações numa só chamada corta o tempo quase por dez. */
-let FILA = {lote:[], apagar:[]}, FILA_TIMER = null, FILA_ENVIO = Promise.resolve(), EM_VOO = null;
+let FILA = {lote:[], apagar:[]}, FILA_TIMER = null, FILA_ENVIO = Promise.resolve(), EM_VOO = null, FILA_FALHAS = 0;
 const FILA_ESPERA = 250, FILA_MAXIMO = 250, CHAVE_FILA = 'fin_fila_pendente';
 
 /* Guarda no navegador tudo que ainda não foi confirmado pelo Google.
@@ -531,20 +548,31 @@ function descarregarFila(){
     pintarNet();
     return FILA_ENVIO;
   }
-  const pacote = {lote: compactar(FILA.lote), apagar: FILA.apagar};
-  FILA = {lote:[], apagar:[]};
+  // blocos de 200 para o pedido não ficar grande demais
+  const todoLote = compactar(FILA.lote), todoApagar = FILA.apagar;
+  const pacote = {lote: todoLote.slice(0,200), apagar: todoApagar.slice(0,200)};
+  FILA = {lote: todoLote.slice(200), apagar: todoApagar.slice(200)};
   FILA_ENVIO = FILA_ENVIO.then(async () => {
     EM_VOO = pacote;              // fica guardado até o Google confirmar
     persistirFila(); pintarNet();
     try{
       await api({action:'gravar', lote:pacote.lote, apagar:pacote.apagar});
-      EM_VOO = null; persistirFila(); pintarNet();
+      EM_VOO = null; FILA_FALHAS = 0; persistirFila(); pintarNet();
+      if (FILA.lote.length || FILA.apagar.length) descarregarFila();   // segue com o resto
     }catch(e){
       // não chegou: volta para a fila e continua guardado no navegador
       FILA.lote = pacote.lote.concat(FILA.lote);
       FILA.apagar = pacote.apagar.concat(FILA.apagar);
-      EM_VOO = null; persistirFila(); pintarNet();
-      toast('Não foi possível salvar agora: ' + e.message + ' O sistema tentará de novo — não feche sem conferir o aviso no topo.','erro');
+      EM_VOO = null; FILA_FALHAS++; persistirFila(); pintarNet();
+      if (FILA_FALHAS < 3){
+        toast('Não salvou ainda: ' + e.message + ' Tentando de novo…','erro');
+        clearTimeout(FILA_TIMER);
+        FILA_TIMER = setTimeout(descarregarFila, 2000 * FILA_FALHAS);
+      } else {
+        toast('Não foi possível salvar após 3 tentativas: ' + e.message
+          + ' Suas alterações estão guardadas neste navegador e serão enviadas quando a conexão voltar — '
+          + 'use o botão de status no topo para tentar de novo.','erro');
+      }
     }
   });
   return FILA_ENVIO;
@@ -1441,7 +1469,9 @@ function cfgGeral(){
     + '<div class="secao-form" style="margin-top:22px">Conferência com a nuvem</div>'
     + '<p class="mini">Compara o que está na tela com o que existe de fato na planilha do Google, '
     + 'aba por aba. Serve para confirmar que nada ficou pelo caminho.</p>'
-    + '<div style="margin-top:8px"><button class="btn" onclick="conferirNuvem()">Conferir com a nuvem</button></div>'
+    + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+    + '<button class="btn" onclick="conferirNuvem()">Conferir com a nuvem</button>'
+    + '<button class="btn sec" onclick="testarConexao()">Testar conexão</button></div>'
     + '<div class="secao-form" style="margin-top:22px">Manutenção da base</div>'
     + '<p class="mini">Procura registros que perderam a origem — parcelas sem lançamento, repasses sem parcela, '
     + 'comissões sem recebimento — e mostra um relatório antes de limpar.</p>'
@@ -1464,6 +1494,53 @@ function cfgGeral(){
     + '<br>Versão do servidor: ' + esc(DB._versao || '—')
     + '<br>Se a versão da página estiver atrasada, atualize com Ctrl+Shift+R (ou Cmd+Shift+R no Mac).</div>';
 }
+/* mostra exatamente o que o Apps Script está devolvendo, sem interpretar */
+async function testarConexao(){
+  carregandoOn('Testando a conexão…');
+  const testes = [];
+  const executar = async (rotulo, opcoes, url) => {
+    const t0 = Date.now();
+    try{
+      const r = await fetch(url || API_URL, opcoes);
+      const txt = await r.text();
+      let tipo = 'desconhecido';
+      try{ JSON.parse(txt); tipo = 'JSON'; }
+      catch(e){ tipo = /^\s*</.test(txt) ? 'página HTML' : 'texto'; }
+      testes.push({rotulo, ms: Date.now()-t0, status: r.status, ct: r.headers.get('content-type') || '—',
+                   tipo, tamanho: txt.length, amostra: txt.slice(0, 400)});
+    }catch(e){
+      testes.push({rotulo, ms: Date.now()-t0, status:'—', ct:'—', tipo:'falha de rede',
+                   tamanho:0, amostra: e.message});
+    }
+  };
+  await executar('Leitura simples (ping)', {method:'GET'}, API_URL + '?action=ping');
+  await executar('Gravação de teste (pacote vazio)',
+    {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+     body: JSON.stringify({action:'gravar', lote:[], apagar:[]})});
+  carregandoOff();
+
+  const linha = t => '<tr'+(t.tipo === 'JSON' ? '' : ' class="grifo"')+'><td><b>'+esc(t.rotulo)+'</b></td>'
+    + '<td>'+esc(String(t.status))+'</td><td>'+t.ms+' ms</td>'
+    + '<td>'+(t.tipo === 'JSON' ? '<span class="tag t-ok">JSON</span>' : '<span class="tag t-ni">'+esc(t.tipo)+'</span>')+'</td>'
+    + '<td class="mini">'+esc(t.ct)+'</td></tr>';
+  const problema = testes.find(t => t.tipo !== 'JSON');
+  modal('Teste de conexão com o Apps Script',
+    '<div class="tw"><table class="densa"><thead><tr><th>Teste</th><th>Status</th><th>Tempo</th>'
+    + '<th>Resposta</th><th>Tipo de conteúdo</th></tr></thead><tbody>'
+    + testes.map(linha).join('') + '</tbody></table></div>'
+    + (problema
+        ? '<div class="erro" style="margin-top:12px"><b>Provável causa:</b> '+esc(diagnosticoResposta({status:problema.status}, problema.amostra))+'</div>'
+          + '<p class="mini" style="margin-top:8px">Começo da resposta recebida, para conferência:</p>'
+          + '<pre style="background:var(--surface2);border:1px solid var(--line);border-radius:6px;padding:10px;'
+          + 'font-size:11.5px;max-height:200px;overflow:auto;white-space:pre-wrap">'+esc(problema.amostra)+'</pre>'
+        : '<p class="mini" style="margin-top:12px">Os dois testes responderam JSON: a implantação está correta e acessível. '
+          + 'Se a gravação falhar mesmo assim, costuma ser instabilidade momentânea do Google — as alterações ficam '
+          + 'guardadas neste navegador e são reenviadas.</p>')
+    + '<p class="mini" style="margin-top:10px">URL em uso: <span style="word-break:break-all">'+esc(API_URL)+'</span></p>',
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + '<button class="btn" onclick="fecharModal();salvarAgora()">Tentar salvar agora</button>', 'larga');
+}
+
 /* confronta a tela com a planilha, linha por linha de cada aba */
 async function conferirNuvem(){
   carregandoOn('Conferindo com a planilha…');
@@ -2321,7 +2398,7 @@ function loteParcela(m, p, valor){
   const l = lancDe(p.LANC_ID);
   const suc = p.TIPO === 'Sucumbência';
   const sucP = suc ? valor : sucDaParcela(p, valor);
-  const tarifa = (!suc && l.TARIFA_ATIVA !== 'NAO') ? rd(n(l.TARIFA_VALOR) || tarifaPadrao()) : 0;
+  const tarifa = suc ? 0 : tarifaDe(p, l);   // no acordo CPC a tarifa vem marcada na parcela
   const baseCom = escPrevisto(p, l, valor);          // parte do escritório, sem a tarifa
   const vEsc = rd(baseCom + tarifa);
   const vCli = rd(valor - baseCom - tarifa);
@@ -2571,7 +2648,7 @@ function reverterAlvo(a){
     if (cp && cp.STATUS === 'Pago')
       return {erro:'O repasse ao cliente de "'+(l.CLIENTE||'')+'" já foi pago. Desfaça primeiro a conciliação desse pagamento.'};
     if (cp){
-      const tar = (p.TIPO !== 'Sucumbência' && l.TARIFA_ATIVA !== 'NAO') ? rd(n(l.TARIFA_VALOR) || tarifaPadrao()) : 0;
+      const tar = tarifaDe(p, l);
       lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {
         VENCIMENTO:p.VENCIMENTO, VALOR:rd(n(p.VALOR) - escPrevisto(p, l) - tar),
         STATUS:'Em aberto', DATA_PGTO:'',
