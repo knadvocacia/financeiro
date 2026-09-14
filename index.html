@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v6.1';
+const VERSAO_APP = 'v6.2';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -373,7 +373,7 @@ function pintarNet(){
   let cls = '', txt = '';
   if (!navigator.onLine){ cls = 'off'; txt = 'Offline'; }
   else if (FILA.lote.length || FILA.apagar.length){ cls = 'salvando'; txt = 'A enviar ' + (FILA.lote.length + FILA.apagar.length); }
-  else if (NET.pendentes > 0){ cls = 'salvando'; txt = 'Salvando…'; }
+  else if (EM_VOO || NET.pendentes > 0){ cls = 'salvando'; txt = 'Salvando…'; }
   else if (NET.erro){ cls = 'erro'; txt = 'Não salvo'; }
   else if (NET.ultimo){ cls = 'salvo'; txt = 'Salvo ' + NET.ultimo; }
   else { cls = 'on'; txt = 'Online'; }
@@ -387,9 +387,13 @@ window.addEventListener('online', () => { NET.erro = ''; pintarNet(); toast('Con
 window.addEventListener('offline', () => { pintarNet(); toast('Você está offline. Nada será salvo até a conexão voltar.','erro'); });
 const agoraHM = () => new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
 async function salvarAgora(){
-  const pend = FILA.lote.length + FILA.apagar.length;
+  const pend = FILA.lote.length + FILA.apagar.length + (EM_VOO ? 1 : 0);
   await descarregarFila();
-  toast(pend ? pend + ' alteração(ões) enviada(s) para a nuvem.' : 'Nada pendente — tudo já está salvo.','ok');
+  await FILA_ENVIO;
+  const restou = pendenciasGuardadas();
+  toast(restou ? 'Ainda há alterações não confirmadas. Verifique a conexão e tente novamente.'
+       : pend ? 'Tudo enviado para a nuvem.' : 'Nada pendente — tudo já está salvo.',
+       restou ? 'erro' : 'ok');
 }
 
 /* ── API ── */
@@ -468,12 +472,46 @@ async function salvarLote(lote){
    As alterações entram numa fila e sobem juntas num único pedido.
    O caro é a ida e volta até o Apps Script, não o tamanho do pacote:
    juntar dez ações numa só chamada corta o tempo quase por dez. */
-let FILA = {lote:[], apagar:[]}, FILA_TIMER = null, FILA_ENVIO = Promise.resolve();
-const FILA_ESPERA = 250, FILA_MAXIMO = 250;
+let FILA = {lote:[], apagar:[]}, FILA_TIMER = null, FILA_ENVIO = Promise.resolve(), EM_VOO = null;
+const FILA_ESPERA = 250, FILA_MAXIMO = 250, CHAVE_FILA = 'fin_fila_pendente';
+
+/* Guarda no navegador tudo que ainda não foi confirmado pelo Google.
+   Assim um Ctrl+Shift+R, uma queda de rede ou fechar a aba não perdem nada:
+   na próxima abertura o sistema reenvia o que ficou. */
+function persistirFila(){
+  try{
+    const lote = FILA.lote.concat(EM_VOO ? EM_VOO.lote : []);
+    const apagar = FILA.apagar.concat(EM_VOO ? EM_VOO.apagar : []);
+    if (lote.length || apagar.length) localStorage.setItem(CHAVE_FILA, JSON.stringify({lote, apagar}));
+    else localStorage.removeItem(CHAVE_FILA);
+  }catch(e){}
+}
+function pendenciasGuardadas(){
+  try{
+    const t = localStorage.getItem(CHAVE_FILA);
+    if (!t) return null;
+    const p = JSON.parse(t);
+    return (p && ((p.lote||[]).length || (p.apagar||[]).length)) ? p : null;
+  }catch(e){ return null; }
+}
+async function reenviarPendencias(){
+  const p = pendenciasGuardadas();
+  if (!p) return;
+  const qtd = (p.lote||[]).length + (p.apagar||[]).length;
+  toast('Reenviando ' + qtd + ' alteração(ões) que não chegaram à nuvem…');
+  FILA.lote = (p.lote||[]).concat(FILA.lote);
+  FILA.apagar = (p.apagar||[]).concat(FILA.apagar);
+  await descarregarFila();
+  if (!pendenciasGuardadas()){
+    toast(qtd + ' alteração(ões) recuperada(s) e salva(s).','ok');
+    await carregar();
+  }
+}
 
 function enfileirar(lote, apagar){
   FILA.lote = FILA.lote.concat(lote || []);
   FILA.apagar = FILA.apagar.concat(apagar || []);
+  persistirFila();
   pintarNet();
   clearTimeout(FILA_TIMER);
   if (FILA.lote.length + FILA.apagar.length >= FILA_MAXIMO) return descarregarFila();
@@ -489,17 +527,24 @@ function compactar(lote){
 function descarregarFila(){
   clearTimeout(FILA_TIMER);
   if (!FILA.lote.length && !FILA.apagar.length){
-    NET.pendentes = 0; pintarNet();
+    if (!EM_VOO){ NET.pendentes = 0; }
+    pintarNet();
     return FILA_ENVIO;
   }
   const pacote = {lote: compactar(FILA.lote), apagar: FILA.apagar};
   FILA = {lote:[], apagar:[]};
   FILA_ENVIO = FILA_ENVIO.then(async () => {
+    EM_VOO = pacote;              // fica guardado até o Google confirmar
+    persistirFila(); pintarNet();
     try{
       await api({action:'gravar', lote:pacote.lote, apagar:pacote.apagar});
+      EM_VOO = null; persistirFila(); pintarNet();
     }catch(e){
-      toast('Não foi possível salvar: ' + e.message + ' — recarregando da nuvem.','erro');
-      await carregar();
+      // não chegou: volta para a fila e continua guardado no navegador
+      FILA.lote = pacote.lote.concat(FILA.lote);
+      FILA.apagar = pacote.apagar.concat(FILA.apagar);
+      EM_VOO = null; persistirFila(); pintarNet();
+      toast('Não foi possível salvar agora: ' + e.message + ' O sistema tentará de novo — não feche sem conferir o aviso no topo.','erro');
     }
   });
   return FILA_ENVIO;
@@ -524,23 +569,24 @@ function excluirLoteRapido(apagar){
    sendBeacon é entregue mesmo com a página saindo — é a garantia de que
    nada da fila se perde. */
 function despacharPendencias(){
-  if (!FILA.lote.length && !FILA.apagar.length) return false;
-  const pacote = {action:'gravar', lote: compactar(FILA.lote), apagar: FILA.apagar};
-  FILA = {lote:[], apagar:[]};
+  const lote = compactar(FILA.lote.concat(EM_VOO ? EM_VOO.lote : []));
+  const apagar = FILA.apagar.concat(EM_VOO ? EM_VOO.apagar : []);
+  if (!lote.length && !apagar.length) return false;
   try{
     if (navigator.sendBeacon){
-      const b = new Blob([JSON.stringify(pacote)], {type:'text/plain;charset=utf-8'});
-      if (navigator.sendBeacon(API_URL, b)) return true;
+      const b = new Blob([JSON.stringify({action:'gravar', lote, apagar})], {type:'text/plain;charset=utf-8'});
+      navigator.sendBeacon(API_URL, b);   // entregue mesmo com a página saindo
     }
   }catch(e){}
-  FILA = {lote: pacote.lote, apagar: pacote.apagar};
-  descarregarFila();
+  // o que estava guardado continua guardado: se o beacon não chegar, o
+  // próximo acesso reenvia. A confirmação só vem por resposta do servidor.
+  persistirFila();
   return true;
 }
 window.addEventListener('pagehide', () => { despacharPendencias(); });
 window.addEventListener('beforeunload', e => {
   const tinha = despacharPendencias();
-  if (tinha || NET.pendentes > 0){ e.preventDefault(); e.returnValue = ''; }
+  if (tinha){ e.preventDefault(); e.returnValue = ''; }
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) descarregarFila(); });
 async function excluir(aba, id){
@@ -561,6 +607,7 @@ async function carregar(avisar){
     const marca = document.getElementById('hdMarca');
     if (marca) marca.title = 'Página ' + VERSAO_APP + ' · servidor ' + (DB._versao || '—');
     render(); pintarNet();
+    if (pendenciasGuardadas()) setTimeout(reenviarPendencias, 300);
     if (avisar) toast('Dados atualizados.','ok');
   }catch(e){ toast(e.message,'erro'); }
   finally{ carregandoOff(); }
