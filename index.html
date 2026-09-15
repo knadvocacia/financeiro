@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v6.5';
+const VERSAO_APP = 'v6.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2588,6 +2588,40 @@ function confirmarVinculos(movId){
   return conciliarVarios(movId, itens);
 }
 
+/* acha o movimento do extrato que deu baixa num registro */
+function movDoRegistro(id){
+  return (DB.EXTRATO||[]).find(m => m.STATUS === 'Conciliado' && idsDoMov(m).indexOf(id) > -1) || null;
+}
+/* desfaz a baixa de um registro: ele volta para contas a receber ou a pagar
+   e o movimento volta para a fila da conciliação */
+async function desconciliarRegistro(id){
+  const mov = movDoRegistro(id);
+  if (mov){
+    const juntos = idsDoMov(mov);
+    if (juntos.length > 1 && !confirm('Este movimento do extrato foi conciliado com ' + juntos.length
+        + ' registros de uma vez. Desconciliar devolve todos eles e o movimento inteiro volta para a conciliação.\n\nContinuar?')) return;
+    return desfazer(mov.ID);
+  }
+  // registro dado como recebido sem movimento vinculado
+  const a = alvoUnico(id);
+  if (!a.tipo) return toast('Registro não encontrado.','erro');
+  if (!confirm('Este registro está baixado sem movimento vinculado no extrato. Devolvê-lo para contas a '
+      + (a.tipo === 'pagar' ? 'pagar' : 'receber') + '?')) return;
+  const r = reverterAlvo(a);
+  if (r.erro) return toast(r.erro,'erro');
+  if (r.apagar && r.apagar.length){
+    r.apagar.forEach(x => { DB[x.aba] = (DB[x.aba]||[]).filter(y => y.ID !== x.id); });
+  }
+  enfileirar(r.lote, r.apagar || []);
+  r.lote.forEach(it => {
+    const L = DB[it.aba] || (DB[it.aba] = []);
+    const j = L.findIndex(x => x.ID === it.registro.ID);
+    if (j >= 0) L[j] = it.registro; else L.push(it.registro);
+  });
+  invalidarIdx(); render();
+  toast('Registro devolvido para contas a ' + (a.tipo === 'pagar' ? 'pagar' : 'receber') + '.','ok');
+}
+
 /* Vincula um registro. Se o valor não bater com o extrato, pergunta se o
    registro deve passar a valer o que realmente caiu na conta. */
 function vincularUm(movId, alvoId, valorRegistro){
@@ -4059,8 +4093,10 @@ function telaRecebidas(){
       + '<td style="text-align:right;white-space:nowrap">'
       + (r.tipo === 'parcela'
           ? '<button class="btn sm sec" onclick="verParcelas(\''+r.lanc+'\')">Ver pasta</button> '
-            + '<button class="btn sm sec" onclick="formLanc(\''+r.lanc+'\')">Editar</button>'
-          : '<button class="btn sm sec" onclick="formRecebida(\''+r.id+'\')">Editar</button>')
+            + '<button class="btn sm sec" onclick="formLanc(\''+r.lanc+'\')">Editar</button> '
+          : '<button class="btn sm sec" onclick="formRecebida(\''+r.id+'\')">Editar</button> ')
+      + '<button class="btn sm per" title="Devolver para contas a receber e o movimento para a conciliação" '
+        + 'onclick="desconciliarRegistro(\''+r.id+'\')">Desconciliar</button>'
       + '</td></tr>').join('')
       : '<tr><td colspan="8">'+vazio('Nada recebido ainda','Concilie um crédito para que ele apareça aqui.')+'</td></tr>')
     + '</tbody></table></div></div>';
@@ -5338,9 +5374,8 @@ function telaPagas(){
     + '</tbody></table></div></div>';
 }
 function botaoDesfazerPago(c){
-  const m = (DB.EXTRATO||[]).find(x => x.PARCELA_ID === c.ID && x.STATUS === 'Conciliado');
-  return m ? '<button class="btn sm sec" onclick="desfazer(\''+m.ID+'\')">Desfazer baixa</button>'
-           : '<span class="mini">—</span>';
+  return '<button class="btn sm per" title="Devolver para contas a pagar e o movimento para a conciliação" '
+    + 'onclick="desconciliarRegistro(\''+c.ID+'\')">Desconciliar</button>';
 }
 
 /* ══════════════════ LIMPEZA DE REGISTROS ÓRFÃOS ══════════════════
