@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v6.6';
+const VERSAO_APP = 'v6.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2146,13 +2146,23 @@ function montarCredito(){
   return out;
 }
 /* candidatos para um débito na conta: contas a pagar em aberto e já liberadas */
+/* Sugestão automática: só o que está liberado e com valor, para não propor
+   um pagamento antes de o dinheiro do cliente ter entrado. */
 function candidatosDebito(){ return memo('debito', montarDebito); }
 function montarDebito(){
-  // contas sem valor (boleto ainda não recebido) não entram como sugestão
-  return (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && n(c.VALOR) > 0 && liberacao(c).tipo !== 'nao').map(c => ({
-    tipo:'pagar', id:c.ID, valor:n(c.VALOR), venc:c.VENCIMENTO,
-    titulo:c.FAVORECIDO || c.DESCRICAO || '—', sub:c.CATEGORIA || '',
-    detalhe:c.DESCRICAO || '', doc:'', proc:'', nome:c.FAVORECIDO, pasta:'' }));
+  return candidatosDebitoTodos().filter(c => !c.travado && c.valor > 0);
+}
+/* Lista completa, usada no vínculo manual: inclui os repasses ainda com ✕ e as
+   contas sem boleto, porque o débito no extrato prova que o pagamento ocorreu. */
+function candidatosDebitoTodos(){ return memo('debitoTodos', montarDebitoTodos); }
+function montarDebitoTodos(){
+  return (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago').map(c => {
+    const lb = liberacao(c);
+    return { tipo:'pagar', id:c.ID, valor:n(c.VALOR), venc:c.VENCIMENTO,
+      titulo:c.FAVORECIDO || c.DESCRICAO || '—', sub:c.CATEGORIA || '',
+      detalhe:c.DESCRICAO || '', doc:'', proc:'', nome:c.FAVORECIDO, pasta:'',
+      travado: lb.tipo === 'nao', semBoleto: !n(c.VALOR) };
+  });
 }
 const ehDebito = mov => n(mov.VALOR) < 0;
 
@@ -2437,9 +2447,10 @@ function loteParcela(m, p, valor){
                                  : 'valor integral do escritório'};
 }
 
-function lotePagamento(m, cp, valor){
-  if (liberacao(cp).tipo === 'nao')
-    return {erro:'A parcela de "'+(cp.FAVORECIDO||cp.DESCRICAO||'—')+'" ainda não foi conciliada. Concilie o crédito antes de baixar o pagamento.'};
+function lotePagamento(m, cp, valor, forcar){
+  if (!forcar && liberacao(cp).tipo === 'nao')
+    return {erro:'A parcela de "'+(cp.FAVORECIDO||cp.DESCRICAO||'—')+'" ainda não foi conciliada. '
+      + 'Use "Vincular manualmente" se o pagamento já saiu da conta e você quer registrar a baixa.'};
   const lote = [{aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {STATUS:'Pago', DATA_PGTO:m.DATA, VALOR:valor,
     OBS:'Pago pelo débito de '+moeda(valor)+' conciliado em '+dataBR(m.DATA)})}];
   (DB.COMISSOES||[]).filter(c => c.CP_ID === cp.ID).forEach(c =>
@@ -2472,20 +2483,20 @@ function comissoesDoRecebimento(cr, valor, data){
 }
 
 /* monta o que gravar para um destino, seja ele parcela, recebimento ou conta a pagar */
-function loteDoAlvo(m, alvoId, valor){
+function loteDoAlvo(m, alvoId, valor, forcar){
   const p = parcDe(alvoId);
   if (p) return loteParcela(m, p, valor);
   const cp = indices().cp.get(alvoId);
-  if (cp) return lotePagamento(m, cp, valor);
+  if (cp) return lotePagamento(m, cp, valor, forcar);
   const cr = indices().cr.get(alvoId);
   if (cr) return loteRecebimento(m, cr, valor);
   return {erro:'Registro de destino não encontrado.'};
 }
 
-async function conciliar(movId, alvoId){
+async function conciliar(movId, alvoId, forcar){
   const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
   if (!m) return toast('Movimento não encontrado.','erro');
-  return conciliarVarios(movId, [{id:alvoId, valor:rd(Math.abs(n(m.VALOR)))}]);
+  return conciliarVarios(movId, [{id:alvoId, valor:rd(Math.abs(n(m.VALOR))), forcar:!!forcar}]);
 }
 
 async function conciliarVarios(movId, itens){
@@ -2500,7 +2511,7 @@ async function conciliarVarios(movId, itens){
 
   let lote = [], resumos = [];
   for (const x of sel){
-    const r = loteDoAlvo(m, x.id, rd(n(x.valor)));
+    const r = loteDoAlvo(m, x.id, rd(n(x.valor)), x.forcar);
     if (r.erro) return toast(r.erro,'erro');
     lote = lote.concat(r.lote);
     resumos.push(r.resumo);
@@ -2624,11 +2635,19 @@ async function desconciliarRegistro(id){
 
 /* Vincula um registro. Se o valor não bater com o extrato, pergunta se o
    registro deve passar a valer o que realmente caiu na conta. */
-function vincularUm(movId, alvoId, valorRegistro){
+function vincularUm(movId, alvoId, valorRegistro, travado){
   const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
   const mov = rd(Math.abs(n(m.VALOR)));
   const reg = rd(n(valorRegistro));
-  if (Math.abs(mov - reg) <= 0.01){ fecharModal(); return conciliar(movId, alvoId); }
+  if (travado){
+    const cp = indices().cp.get(alvoId) || {};
+    const lb = liberacao(cp);
+    if (!confirm('A parcela do cliente "' + (cp.FAVORECIDO || '—') + '" ainda não foi conciliada'
+        + (lb.p ? ' (falta o crédito de ' + moeda(lb.p.VALOR) + ')' : '')
+        + '.\n\nO débito de ' + moeda(mov) + ' já saiu da conta, então o pagamento aconteceu. '
+        + 'Registrar a baixa mesmo assim?')) return;
+  }
+  if (Math.abs(mov - reg) <= 0.01){ fecharModal(); return conciliar(movId, alvoId, travado); }
 
   const dif = rd(mov - reg);
   modal('Valores diferentes',
@@ -2639,11 +2658,11 @@ function vincularUm(movId, alvoId, valorRegistro){
     + '<p class="mini" style="margin-top:10px">Alterando, o rateio entre cliente e escritório é recalculado na mesma '
     + 'proporção. Mantendo, o registro fica com o valor lançado e a conciliação usa o valor do extrato.</p>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
-    + '<button class="btn sec" onclick="fecharModal();conciliar(\''+movId+'\',\''+alvoId+'\')">Manter '+moeda(reg)+'</button>'
-    + '<button class="btn ok" onclick="fecharModal();ajustarEConciliar(\''+movId+'\',\''+alvoId+'\')">'
+    + '<button class="btn sec" onclick="fecharModal();conciliar(\''+movId+'\',\''+alvoId+'\','+(travado?'1':'0')+')">Manter '+moeda(reg)+'</button>'
+    + '<button class="btn ok" onclick="fecharModal();ajustarEConciliar(\''+movId+'\',\''+alvoId+'\','+(travado?'1':'0')+')">'
     + 'Sim, usar '+moeda(mov)+'</button>', 'estreita');
 }
-async function ajustarEConciliar(movId, alvoId){
+async function ajustarEConciliar(movId, alvoId, forcar){
   const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
   const novo = rd(Math.abs(n(m.VALOR)));
   const lote = [];
@@ -2670,7 +2689,7 @@ async function ajustarEConciliar(movId, alvoId){
   }
   if (lote.length) salvarLoteRapido(lote);   // o registro já fica com o valor novo
   toast('Valor do registro ajustado para ' + moeda(novo) + '.','ok');
-  return conciliar(movId, alvoId);
+  return conciliar(movId, alvoId, forcar);
 }
 
 /* ── Desfazer ── */
@@ -2812,7 +2831,7 @@ function pintarVinculoUm(movId){
     if (dt && digitos(nMoeda(c.valor)).includes(dt)) return true;   // acha por 1000 ou 1.000,00
     return false;
   };
-  const todos = (deb ? candidatosDebito() : candidatosCredito()).filter(casaTermo)
+  const todos = (deb ? candidatosDebitoTodos() : candidatosCredito()).filter(casaTermo)
     .sort((a,b) => Math.abs(a.valor - alvo) - Math.abs(b.valor - alvo)
                 || String(a.venc).localeCompare(String(b.venc)));
   const L = todos.slice(0, 60);
@@ -2825,12 +2844,14 @@ function pintarVinculoUm(movId){
   box.innerHTML = '<div class="tw" style="max-height:340px;overflow:auto"><table class="densa">'
     + '<thead><tr><th>Registro</th><th>Vencimento</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
     + L.map(c => '<tr'+(Math.abs(c.valor - alvo) <= 0.01 ? ' class="sel"' : '')+'>'
-      + '<td><b>'+esc(c.titulo)+'</b><div class="mini">'+esc(c.sub + (c.detalhe ? ' · ' + c.detalhe : ''))+'</div></td>'
+      + '<td><b>'+esc(c.titulo)+'</b><div class="mini">'+esc(c.sub + (c.detalhe ? ' · ' + c.detalhe : ''))+'</div>'
+        + (c.travado ? '<div class="mini"><span class="tag t-ni">✕ parcela do cliente ainda não conciliada</span></div>' : '')
+        + (c.semBoleto ? '<div class="mini"><span class="tag t-pend">sem boleto — usa o valor do extrato</span></div>' : '')+'</td>'
       + '<td>'+dataBR(c.venc)+'</td>'
-      + '<td class="num">'+nMoeda(c.valor)
-        + (Math.abs(c.valor - alvo) <= 0.01 ? '<div class="mini pos">valor idêntico</div>' : '')+'</td>'
+      + '<td class="num">'+(c.semBoleto ? '<span class="mini">—</span>' : nMoeda(c.valor))
+        + (!c.semBoleto && Math.abs(c.valor - alvo) <= 0.01 ? '<div class="mini pos">valor idêntico</div>' : '')+'</td>'
       + '<td style="text-align:right"><button class="btn sm ok" '
-        + 'onclick="vincularUm(\''+movId+'\',\''+c.id+'\','+c.valor+')">Vincular</button></td></tr>').join('')
+        + 'onclick="vincularUm(\''+movId+'\',\''+c.id+'\','+(c.semBoleto ? alvo : c.valor)+','+(c.travado?'1':'0')+')">Vincular</button></td></tr>').join('')
     + '</tbody></table></div>'
     + '<p class="mini" style="margin-top:6px">'
     + (todos.length > L.length ? 'Mostrando 60 de ' + todos.length + ' — refine a busca. ' : '')
