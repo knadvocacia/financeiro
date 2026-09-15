@@ -279,7 +279,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v6.4';
+const VERSAO_APP = 'v6.5';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -3112,7 +3112,7 @@ async function excluirImportacao(chave){
 
 const hashMov = (d,v,desc) => String(d)+'|'+rd(v)+'|'+String(desc||'').replace(/\s+/g,' ').trim().toUpperCase().slice(0,60);
 /* ══════════════════ IMPORTAÇÃO DE EXTRATO ══════════════════ */
-let IMP = [], IMP_BRUTO = [], IMP_NOME = '';
+let IMP = [], IMP_BRUTO = [], IMP_NOME = '', IMP_IGNORADOS = [];
 function formImportar(){
   if (!(DB.CONTAS_BANCO||[]).length){
     modal('Importar extrato bancário',
@@ -3130,10 +3130,12 @@ function formImportar(){
     + 'Valor negativo ou com D no fim é débito. <button class="btn sm sec" onclick="lerColado()">Ler texto colado</button></p></div>'
     + sel('impBanco','Conta bancária deste extrato', opcoesContas(false), FILTROS.fConta || '', '', 'onchange="if(IMP_BRUTO.length)previaImport()"')
     + '<input type="hidden" id="impTudo" value="">'
-    + '<div id="impPrevia"><p class="mini">O sistema lê data, identificação e valor. Movimentos já importados são ignorados automaticamente.</p></div>',
+    + '<div id="impPrevia"><p class="mini">O sistema lê data, identificação e valor. '
+    + 'A conferência é por contagem: se o arquivo traz três movimentos iguais e a conta já tem um, '
+    + 'entram os dois que faltam. Reimportar o mesmo extrato não duplica nada — e traz o que ficou de fora antes.</p></div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" id="btnImp" disabled onclick="confirmarImport()">Importar movimentos</button>',
     'larga');
-  IMP = []; IMP_BRUTO = []; IMP_NOME = '';
+  IMP = []; IMP_BRUTO = []; IMP_NOME = ''; IMP_IGNORADOS = [];
 }
 async function lerArquivo(inp){
   const f = inp.files[0]; if (!f) return;
@@ -3278,13 +3280,15 @@ function previaImport(){
     existentes[k] = (existentes[k] || 0) + 1;
   });
   const usados = {};
-  IMP = [];
+  IMP = []; IMP_IGNORADOS = [];
   let repetidos = 0;
   linhas.forEach(l => {
     const h = hashMov(l.DATA, l.VALOR, l.IDENTIFICACAO);
     const k = h + '|' + banco;
     usados[k] = (usados[k] || 0) + 1;
-    if (!semConferir && usados[k] <= (existentes[k] || 0)){ repetidos++; return; }
+    if (!semConferir && usados[k] <= (existentes[k] || 0)){
+      repetidos++; IMP_IGNORADOS.push(l); return;
+    }
     IMP.push(Object.assign({}, l, {HASH:h}));
   });
   const total = IMP.reduce((s,m) => s + n(m.VALOR), 0);
@@ -3297,9 +3301,17 @@ function previaImport(){
       + (semConferir ? '✓ Importando tudo, sem conferir repetição' : 'Importar tudo, sem conferir repetição') + '</button>'
       + '</div>'
     + (repetidos && !semConferir
-        ? '<p class="mini" style="margin-bottom:8px">'+repetidos+' movimento(s) já existem nesta conta com a mesma data, '
-          + 'valor e histórico, e por isso ficaram fora. Se forem lançamentos diferentes que por acaso coincidem, '
-          + 'use o botão acima para importar todos.</p>'
+        ? '<div class="card" style="border-left:3px solid var(--brass);margin-bottom:10px"><div class="corpo">'
+          + '<b>'+repetidos+' movimento(s) ficaram de fora</b> porque a conta já tem outro igual em data, valor e histórico. '
+          + '<span class="mini">Se forem lançamentos diferentes que por acaso coincidem, use "Importar tudo" acima.</span>'
+          + '<div class="tw" style="max-height:180px;overflow:auto;margin-top:8px"><table class="densa">'
+          + '<thead><tr><th>Data</th><th>Histórico</th><th class="num">Valor</th></tr></thead><tbody>'
+          + IMP_IGNORADOS.slice(0,80).map(l => '<tr><td>'+dataBR(l.DATA)+'</td>'
+            + '<td>'+esc(tit(l.IDENTIFICACAO)||'—')+'</td>'
+            + '<td class="num '+(n(l.VALOR)<0?'neg':'')+'">'+nMoeda(l.VALOR)+'</td></tr>').join('')
+          + '</tbody></table></div>'
+          + (IMP_IGNORADOS.length > 80 ? '<p class="mini">Mostrando os 80 primeiros.</p>' : '')
+          + '</div></div>'
         : '')
     + '<div class="tw" style="max-height:280px;overflow:auto"><table><thead><tr><th>Data</th><th>Identificação</th><th class="num">Valor</th></tr></thead><tbody>'
     + IMP.slice(0,150).map(m => '<tr><td>'+dataBR(m.DATA)+'</td><td>'+esc(tit(m.IDENTIFICACAO)||'—')+'</td><td class="num '+(n(m.VALOR)<0?'neg':'')+'">'+nMoeda(m.VALOR)+'</td></tr>').join('')
