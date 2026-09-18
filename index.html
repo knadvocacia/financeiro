@@ -187,6 +187,16 @@ table.densa .btn.sm{padding:2px 8px;font-size:11px}
 .overlay.on{display:flex}
 .modal{background:#fff;border-radius:9px;width:100%;max-width:760px;box-shadow:0 20px 60px rgba(0,0,0,.28)}
 .modal.larga{max-width:1000px}
+/* etiqueta clicável: parece uma tag, funciona como botão */
+.tagbtn{font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:20px;border:1px solid transparent;
+        cursor:pointer;font-family:inherit;letter-spacing:.02em}
+.tagbtn:hover{filter:brightness(.94);text-decoration:underline}
+.tagbtn.t-ok{background:var(--pos-l);color:var(--pos)}
+.tagbtn.t-pend{background:var(--brass-l);color:var(--brass)}
+.tagbtn.t-ni{background:var(--neg-l);color:var(--neg)}
+.modal.ampla{max-width:1480px;width:97vw}
+.modal.ampla .corpo{max-height:78vh}
+.modal.ampla .grade{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
 .modal.estreita{max-width:440px}
 .modal h3{font-size:16px;padding:16px 20px;border-bottom:1px solid var(--line2);display:flex;align-items:center}
 .modal h3 .x{margin-left:auto;background:none;border:0;font-size:22px;line-height:1;color:var(--ink3)}
@@ -279,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v7.2';
+const VERSAO_APP = 'v7.5';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2636,8 +2646,7 @@ function listaNaoIdentificados(L){
   return L.sort((a,b) => String(a.DATA).localeCompare(String(b.DATA))).map(m =>
     '<div class="card fino"><div class="corpo conc">'
     + ladoMovimento(m, '<button class="btn sm sec" onclick="voltarPendente(\''+m.ID+'\')">Voltar para pendentes</button>'
-                     + '<button class="btn sm sec" onclick="formObsMov(\''+m.ID+'\')">Observações</button>'
-                     + '<button class="btn sm per" onclick="excluirMov(\''+m.ID+'\')">Excluir</button>')
+                     + '<button class="btn sm sec" onclick="formObsMov(\''+m.ID+'\')">Observações</button>')
     + '<div class="sugs"><p class="mini" style="margin-bottom:5px">'
     + (ehDebito(m) ? 'Contas a pagar em aberto com o mesmo valor:'
                    : 'Pastas em aberto com o mesmo valor, inclusive acordos lançados depois do crédito:') + '</p>'
@@ -3074,11 +3083,11 @@ function reverterAlvo(a){
   return {lote, apagar};
 }
 
-async function desfazer(movId){
+async function desfazer(movId, semPerguntar){
   const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
   const alvos = alvosDe(m);
   const quantos = alvos.length;
-  if (!confirm(quantos > 1
+  if (!semPerguntar && !confirm(quantos > 1
       ? 'Desfazer a conciliação deste movimento com ' + quantos + ' registros? Todos voltam ao estado anterior.'
       : 'Desfazer? O registro volta ao estado anterior e as comissões geradas são removidas.')) return;
 
@@ -3240,7 +3249,7 @@ function formNovoNaConciliacao(movId){
     + '<p class="mini" style="margin-top:10px">Ao salvar, o registro é criado e este movimento já fica conciliado com ele.</p>';
   modal(deb ? 'Nova conta a pagar a partir do extrato' : 'Novo recebimento a partir do extrato', corpo,
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
-    + '<button class="btn ok" onclick="gravarNovoNaConciliacao(\''+movId+'\')">Salvar e conciliar</button>');
+    + '<button class="btn ok" onclick="gravarNovoNaConciliacao(\''+movId+'\')">Salvar e conciliar</button>', 'ampla');
 }
 /* categoria mudou: refaz o seletor de subcategoria e o bloco de rateio ou acordo */
 function mudouCategoriaNC(deb){
@@ -3313,19 +3322,24 @@ function sincronizaRateio(origem){
 /* Categoria de acordo parcelado: abre os campos do lançamento dentro da conciliação.
    Reaproveita os mesmos ids do formulário de lançamento, para gravar pela mesma rotina. */
 function montaAcordo(box){
-  if (box.dataset.modo === 'acordo') return;   // já montado, não perde o que foi digitado
-  box.dataset.modo = 'acordo';
+  const cpc = catCPC(val('ncCat'));
+  const modo = cpc ? 'acordo-cpc' : 'acordo';
+  // o acordo CPC tem outro formulário: trocar entre os dois precisa remontar,
+  // senão os campos do anterior ficam na tela
+  if (box.dataset.modo === modo) return;       // já montado, não perde o que foi digitado
+  if (box.dataset.modo === 'acordo' || box.dataset.modo === 'acordo-cpc') PARC_TMP = [];
+  box.dataset.modo = modo;
   const total = nMoeda(rd(n(val('ncValor'))));
   // pasta, cliente, praça e EXEC vêm dos campos de cima; aqui só viajam escondidos
-  const cpc = catCPC(val('ncCat'));
   box.innerHTML = '<div class="grade">'
     + '<input type="hidden" id="lcPasta"><input type="hidden" id="lcCliente">'
     + '<input type="hidden" id="lcPraca"><input type="hidden" id="lcDoc"><input type="hidden" id="lcProc">'
     + '<input type="checkbox" id="lcExec" style="display:none">'
-    + '<div class="secao-form">Dados do acordo</div>'
-    + (cpc ? '' : inp('lcDataAcordo','Data do acordo', val('ncVenc') || hoje(), '', 'date'))
-    + sel('lcAudiencia','Audiência', [['','— selecione —']].concat(AUDIENCIAS.map(a => [a,a])), '')
-    + (cpc ? '' : inp('lcAdvogado','Advogado que fez o acordo',''))
+    + (cpc ? '' : '<div class="secao-form">Dados do acordo</div>')
+    + (cpc ? '' :
+        inp('lcDataAcordo','Data do acordo', val('ncVenc') || hoje(), '', 'date')
+      + sel('lcAudiencia','Audiência', [['','— selecione —']].concat(AUDIENCIAS.map(a => [a,a])), '')
+      + inp('lcAdvogado','Advogado que fez o acordo',''))
     + '<div class="secao-form">Parcelas</div>'
     + inp('lcQtd','Quantidade de parcelas', cpc ? 3 : 1, '', 'number',
           'min="1" max="24" oninput="' + (cpc ? 'montarCPC()' : 'recalcParcelas()') + '"')
@@ -3518,17 +3532,85 @@ function historicoImportacoes(){
         + '<td class="mini">'+dataBR(g.de)+' a '+dataBR(g.ate)+'</td>'
         + '<td class="num">'+g.movs.length+'</td>'
         + '<td class="num">'+nMoeda(g.total)+'</td>'
-        + '<td>'+(g.conciliados ? '<span class="tag t-ok">'+g.conciliados+' conciliados</span> ' : '')
-              + (g.pendentes ? '<span class="tag t-pend">'+g.pendentes+' pendentes</span> ' : '')
-              + (g.naoId ? '<span class="tag t-ni">'+g.naoId+' não identificados</span>' : '')+'</td>'
+        + '<td style="white-space:nowrap">'
+              + (g.conciliados ? '<button class="tagbtn t-ok" onclick="detalheLote(\''+esc(g.chave).replace(/'/g,"\\'")+'\',\'Conciliado\')">'
+                  + g.conciliados+' conciliados</button> ' : '')
+              + (g.pendentes ? '<button class="tagbtn t-pend" onclick="detalheLote(\''+esc(g.chave).replace(/'/g,"\\'")+'\',\'Pendente\')">'
+                  + g.pendentes+' pendentes</button> ' : '')
+              + (g.naoId ? '<button class="tagbtn t-ni" onclick="detalheLote(\''+esc(g.chave).replace(/'/g,"\\'")+'\',\'Nao identificado\')">'
+                  + g.naoId+' não identificados</button>' : '')+'</td>'
         + '<td style="text-align:right"><button class="btn sm per" onclick="excluirImportacao(\''+esc(g.chave).replace(/'/g,"\\'")+'\')">Excluir</button></td></tr>').join('')
       + '</tbody></table></div>'
       + '<p class="mini" style="margin-top:10px">Excluir uma importação apaga os movimentos dela. '
-      + 'Movimentos já conciliados travam a exclusão — desfaça a conciliação antes.</p>'
+      + 'Movimentos já conciliados travam a exclusão — clique em <b>conciliados</b> para ver quais são '
+      + 'e desfazer a conciliação de cada um.</p>'
     : vazio(todos.length ? 'Nada neste filtro' : 'Nenhuma importação',
             todos.length ? 'Ajuste as datas, a conta ou a busca.'
                          : 'Os extratos importados aparecem aqui, com a opção de excluir cada arquivo.'));
   modal('Histórico de importações', corpo, '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
+}
+/* lista os movimentos de uma importação numa situação, para poder agir sobre eles */
+function detalheLote(chave, situacao){
+  const g = lotesImportados().find(x => x.chave === chave);
+  if (!g) return toast('Importação não encontrada.','erro');
+  const L = g.movs.filter(m => m.STATUS === situacao)
+    .sort((a,b) => String(a.DATA).localeCompare(String(b.DATA)));
+  const rotulo = situacao === 'Conciliado' ? 'conciliados'
+               : situacao === 'Pendente' ? 'pendentes' : 'não identificados';
+  const linha = m => {
+    const a = situacao === 'Conciliado' ? alvoDe(m) : null;
+    return '<tr><td>'+dataBR(m.DATA)+'</td>'
+      + '<td>'+esc(m.IDENTIFICACAO||'—')+'</td>'
+      + '<td class="num '+(n(m.VALOR)<0?'neg':'')+'">'+nMoeda(m.VALOR)+'</td>'
+      + (situacao === 'Conciliado' ? '<td>'+a.quem+'</td>' : '')
+      + '<td style="text-align:right;white-space:nowrap">'
+      + (situacao === 'Conciliado'
+          ? '<button class="btn sm sec" onclick="fecharModal();abrirAlvo(\''+m.ID+'\')">Abrir</button> '
+            + '<button class="btn sm per" onclick="desfazerEVoltar(\''+m.ID+'\',\''+esc(chave).replace(/'/g,"\\'")+'\')">Desconciliar</button>'
+          : '<button class="btn sm sec" onclick="fecharModal();irPara(\'conciliacao\','
+            + (situacao === 'Pendente' ? '\'pendentes\'' : '\'naoid\'') + ')">Ver na conciliação</button>')
+      + '</td></tr>';
+  };
+  modal('Movimentos ' + rotulo + ' — ' + (g.arquivo || 'importação anterior'),
+    (situacao === 'Conciliado'
+      ? '<p class="mini" style="margin-bottom:10px">Para excluir esta importação, é preciso desconciliar todos estes '
+        + L.length + ' movimento(s). Cada um volta para a fila de pendentes e o registro de destino volta para as listas.</p>'
+      : '<p class="mini" style="margin-bottom:10px">' + L.length + ' movimento(s) nesta situação.</p>')
+    + '<div class="tw" style="max-height:420px;overflow:auto"><table class="densa"><thead><tr>'
+    + '<th>Data</th><th>Histórico</th><th class="num">Valor</th>'
+    + (situacao === 'Conciliado' ? '<th>Baixou</th>' : '') + '<th></th></tr></thead><tbody>'
+    + (L.length ? L.map(linha).join('')
+       : '<tr><td colspan="5" class="mini">Nenhum movimento nesta situação.</td></tr>')
+    + '</tbody></table></div>',
+    '<button class="btn sec" onclick="fecharModal();historicoImportacoes()">Voltar ao histórico</button>'
+    + (situacao === 'Conciliado' && L.length
+        ? '<button class="btn per" onclick="desconciliarLoteTodo(\''+esc(chave).replace(/'/g,"\\'")+'\')">'
+          + 'Desconciliar os ' + L.length + '</button>' : ''), 'larga');
+}
+/* desfaz um e reabre a lista, para seguir desconciliando sem procurar de novo */
+async function desfazerEVoltar(movId, chave){
+  await desfazer(movId);
+  const g = lotesImportados().find(x => x.chave === chave);
+  if (g && g.conciliados) detalheLote(chave, 'Conciliado');
+  else historicoImportacoes();
+}
+async function desconciliarLoteTodo(chave){
+  const g = lotesImportados().find(x => x.chave === chave);
+  if (!g) return;
+  const L = g.movs.filter(m => m.STATUS === 'Conciliado');
+  if (!L.length) return toast('Nada a desconciliar.','ok');
+  if (!confirm('Desconciliar os ' + L.length + ' movimento(s) desta importação?\n\n'
+    + 'Cada registro de destino volta para contas a receber ou a pagar, e as comissões não pagas são removidas.')) return;
+  fecharModal();
+  carregandoOn('Desconciliando ' + L.length + ' movimento(s)…');
+  try{
+    for (let i = 0; i < L.length; i++){
+      carregandoOn('Desconciliando… ' + (i+1) + ' de ' + L.length);
+      await desfazer(L[i].ID, true);
+    }
+    toast(L.length + ' movimento(s) desconciliado(s). A importação já pode ser excluída.','ok');
+    historicoImportacoes();
+  }catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
 }
 async function excluirImportacao(chave){
   const g = lotesImportados().find(x => x.chave === chave);
@@ -4886,6 +4968,23 @@ async function removerAnexoCP(id){
   try{ await salvarLoteRapido([{aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {ANEXO_URL:''})}]);
        toast('Boleto removido da conta.','ok'); }catch(e){}
 }
+/* o repasse ao cliente ganha o campo de pasta, para ligar a conta ao processo */
+function mudouCategoriaCP(){
+  montaSubcat('cpCat','boxSubcatCP','cpSubcat','');
+  montaPastaCP('');
+}
+function montaPastaCP(atual){
+  const box = document.getElementById('boxPastaCP'); if (!box) return;
+  if (val('cpCat') !== 'Repasse a cliente' && !atual){ box.innerHTML = ''; return; }
+  box.innerHTML = '<label for="cpPasta">Pasta do cliente</label>'
+    + '<input id="cpPasta" list="dlPastasCP" autocomplete="off" value="'+esc(atual||'')+'" '
+    + 'placeholder="número da pasta">'
+    + '<datalist id="dlPastasCP">'
+    + [...new Set((DB.LANCAMENTOS||[]).map(l => l.PASTA).filter(Boolean))]
+        .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'))
+        .map(p => '<option value="'+esc(p)+'"></option>').join('')
+    + '</datalist>';
+}
 async function alternarSemDados(id){
   const c = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id); if (!c) return;
   const marcado = semDadosCP(c);
@@ -5017,8 +5116,9 @@ function formCP(id){
       + '<button class="btn sec" style="padding:8px 12px" title="Adicionar aos favorecidos" onclick="addFavorecidoRapido(\'cpFav\',\'cpCat\')">+</button></div>'
       + '<datalist id="dlFav">'+optsFavorecidos()+'</datalist></div>'
     + sel('cpCat','Categoria (débito)', opcoesCategorias('D', c.CATEGORIA, '— selecione —'), c.CATEGORIA, '',
-        'onchange="this.dataset.tocado=1;montaSubcat(\'cpCat\',\'boxSubcatCP\',\'cpSubcat\',\'\')"')
+        'onchange="this.dataset.tocado=1;mudouCategoriaCP()"')
     + '<div class="campo" id="boxSubcatCP" style="padding:0;margin:0"></div>'
+    + '<div class="campo" id="boxPastaCP" style="padding:0;margin:0"></div>'
     + inp('cpVenc','Vencimento', c.VENCIMENTO || hoje(), '', 'date', 'onchange="avisoDiaUtil(this.value)"')
     + inp('cpValor','Valor (R$)', c.VALOR ? nMoeda(c.VALOR) : '')
     + '<div class="campo full" id="avisoUtil" style="padding:0;margin:0"></div>'
@@ -5044,6 +5144,7 @@ function formCP(id){
     + '<p class="mini" style="margin-top:8px">A conta é dada como paga apenas quando o débito correspondente for conciliado no extrato.</p>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" onclick="gravarCP(\''+(id||'')+'\')">Salvar conta</button>');
   montaSubcat('cpCat', 'boxSubcatCP', 'cpSubcat', c.SUBCATEGORIA);
+  montaPastaCP(c.PASTA);
   if (c.LINHA_DIGITAVEL) pintarLinha(c.LINHA_DIGITAVEL, 'gravado nesta conta');
   else { const b = document.getElementById('boxLinha'); if (b) b.innerHTML = campoLinhaManual(''); }
 }
@@ -5097,7 +5198,8 @@ async function gravarCP(id){
   if (!recorrente && !n(val('cpValor'))) return toast('Informe o valor.','erro');
   const atual = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id) || {};
   const comum = { DESCRICAO:tit(val('cpDesc')), FAVORECIDO:tit(val('cpFav')), CATEGORIA:val('cpCat'),
-                  SUBCATEGORIA:val('cpSubcat'), SEM_DADOS: val('cpSemDados') ? 'SIM' : '', OBS:val('cpObs'),
+                  SUBCATEGORIA:val('cpSubcat'), PASTA: tit(val('cpPasta')),
+                  SEM_DADOS: val('cpSemDados') ? 'SIM' : '', OBS:val('cpObs'),
                   LINHA_DIGITAVEL: String(val('cpLinha')||'').replace(/\D/g,'') };
 
   const fav = garantirFavorecido(tit(val('cpFav')), val('cpCat'));
@@ -5872,7 +5974,9 @@ function telaContaCorrente(){
           + '<td class="num pos">'+(d ? '—' : nMoeda(v))+'</td>'
           + '<td class="num neg">'+(d ? nMoeda(Math.abs(v)) : '—')+'</td>'
           + '<td class="num'+(r.saldo < 0 ? ' neg' : '')+'">'+nMoeda(r.saldo)+'</td>'
-          + '<td style="text-align:right"><button class="btn sm sec" onclick="desfazer(\''+r.m.ID+'\')">Desfazer</button></td></tr>';
+          + '<td style="text-align:right;white-space:nowrap">'
+          + '<button class="btn sm sec" onclick="abrirAlvo(\''+r.m.ID+'\')">Abrir</button> '
+          + '<button class="btn sm sec" onclick="desfazer(\''+r.m.ID+'\')">Desfazer</button></td></tr>';
       }).join('')
       : '<tr><td colspan="8">'+vazio('Nenhum movimento conciliado','Concilie os créditos e débitos do extrato para vê-los aqui.')+'</td></tr>')
     + '</tbody></table></div></div>'
