@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v7.5';
+const VERSAO_APP = 'v8.0';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -1039,7 +1039,17 @@ function aplicarCategoriaFavorecido(campoNome, campoCat){
   if (!f || !f.CATEGORIA) return;
   const existe = [...campo.options].some(o => o.value === f.CATEGORIA);
   if (!existe) campo.add(new Option(f.CATEGORIA + ' (fora do cadastro)', f.CATEGORIA));
+  if (campo.value === f.CATEGORIA) return;   // nada mudou, nada a refazer
   campo.value = f.CATEGORIA;
+  // mudar o valor por código não dispara o onchange do campo: sem este aviso,
+  // a subcategoria da categoria escolhida não aparecia até trocar na mão
+  avisarMudanca(campo);
+}
+/* dispara o onchange do campo como se a pessoa tivesse escolhido */
+function avisarMudanca(campo){
+  if (!campo) return;
+  try{ campo.dispatchEvent(new Event('change', {bubbles:true})); }
+  catch(e){ if (typeof campo.onchange === 'function') campo.onchange(); }
 }
 function optsFavorecidos(){
   return (DB.FAVORECIDOS||[]).filter(f => f.ATIVO !== 'NAO')
@@ -1911,12 +1921,14 @@ function valorCPC(i, campo, texto){
   const v = n(texto);
   const p = PARC_TMP[i]; if (!p) return;
   p[campo] = v;
-  if (i > 0) p[campo + '_MAN'] = true;      // linha seguinte alterada à mão
-  if (i === 0){
-    PARC_TMP.forEach((q2, j) => {
-      if (j === 0 || q2.STATUS === 'Recebida' || q2[campo + '_MAN']) return;
-      q2[campo] = v;
-    });
+  p[campo + '_MAN'] = true;                  // esta linha foi digitada à mão
+  // o valor desce para as parcelas seguintes até encontrar outra digitada:
+  // digitar a 1 preenche todas; digitar a 2 preenche da 2 para baixo
+  for (let j = i + 1; j < PARC_TMP.length; j++){
+    const q2 = PARC_TMP[j];
+    if (q2[campo + '_MAN']) break;
+    if (q2.STATUS === 'Recebida') continue;
+    q2[campo] = v;
   }
 }
 function marcarParcelaExtrato(i){
@@ -1986,7 +1998,8 @@ function pintarCPC(box){
     + '<p class="mini" style="margin-top:6px">Digite o valor do cliente e o do escritório em cada parcela — '
     + 'o total é calculado e não há percentual. Marcando <b>Tarifa</b>, os '+moeda(tarifa)
     + ' saem do cliente e vão para o escritório naquela parcela. '
-    + 'O valor digitado na parcela 1 é repetido nas demais; alterando uma linha, ela passa a ter valor próprio. '
+    + 'O valor digitado numa parcela desce para as seguintes: digite na 1 para preencher todas, '
+    + 'ou na 2 para preencher da 2 em diante. '
     + 'Marque <b>Do extrato</b> na parcela que corresponde ao movimento que está sendo conciliado; '
     + 'as outras entram em contas a receber, com o repasse já em contas a pagar. '
     + 'O ✕ desconsidera a parcela e o ↺ traz de volta.</p>';
@@ -2887,27 +2900,47 @@ function formVincularVarios(movId){
   const cands = (deb ? candidatosDebito() : candidatosCredito())
     .sort((a,b) => String(a.venc).localeCompare(String(b.venc)));
   if (!cands.length) return toast(deb ? 'Não há contas a pagar liberadas para vincular.' : 'Não há registros em aberto para vincular.','erro');
-  VINC = {};
+  VINC = {}; FILTROS.vincBusca = '';
   modal('Vincular vários registros — ' + moeda(m.VALOR),
     '<p class="mini" style="margin-bottom:12px">Movimento de <b>'+moeda(m.VALOR)+'</b> em '+dataBR(m.DATA)
     + (m.BANCO ? ' · '+esc(m.BANCO) : '') + ' — '+esc(m.IDENTIFICACAO||'')+'</p>'
-    + '<div class="filtros">' + campoTexto('vincBusca','Buscar','cliente, pasta, favorecido…') + '</div>'
+    + '<div class="campo" style="margin-bottom:12px"><label for="vincBusca">Buscar</label>'
+    + '<input id="vincBusca" autocomplete="off" placeholder="cliente, pasta, favorecido, processo ou valor" '
+    + 'oninput="buscaVinculos(\'' + movId + '\', this.value)"></div>'
     + '<div id="boxVinc"></div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
     + '<button class="btn ok" onclick="confirmarVinculos(\'' + movId + '\')">Conciliar selecionados</button>', 'larga');
+  pintarVinculos(movId);
+  const e = document.getElementById('vincBusca'); if (e) e.focus();
+}
+/* a busca redesenha só a lista da janela — render() redesenharia a tela de fundo */
+function buscaVinculos(movId, texto){
+  FILTROS.vincBusca = texto;
   pintarVinculos(movId);
 }
 function pintarVinculos(movId){
   const box = document.getElementById('boxVinc'); if (!box) return;
   const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
   const total = rd(Math.abs(n(m.VALOR)));
-  const termo = (FILTROS.vincBusca || '').toLowerCase();
-  const cands = (ehDebito(m) ? candidatosDebito() : candidatosCredito())
-    .filter(c => !termo || (c.titulo + ' ' + c.detalhe + ' ' + c.sub).toLowerCase().includes(termo))
+  const termo = String(FILTROS.vincBusca || '').trim().toLowerCase();
+  const casaTermo = c => !termo
+    || [c.titulo, c.detalhe, c.sub, c.pasta, c.proc, c.nome].join(' ').toLowerCase().includes(termo)
+    || casaValor(c.valor, termo);
+  const todos = (ehDebito(m) ? candidatosDebitoTodos() : candidatosCredito())
+    .filter(casaTermo)
     .sort((a,b) => String(a.venc).localeCompare(String(b.venc)));
+  const cands = todos.slice(0, 80);
   const soma = rd(Object.keys(VINC).reduce((s,k) => s + rd(n(VINC[k])), 0));
   const falta = rd(total - soma);
 
+  if (!cands.length){
+    box.innerHTML = vazio('Nada encontrado','Tente outro nome, a pasta, o processo ou o valor.')
+      + '<div class="barraSel" style="margin-top:12px"><b>'+Object.keys(VINC).length+'</b> selecionado(s) · '
+      + 'soma ' + moeda(soma) + ' de ' + moeda(total)
+      + '<span style="flex:1"></span>'
+      + '<button class="btn sm sec" onclick="VINC={};pintarVinculos(\''+movId+'\')">Limpar</button></div>';
+    return;
+  }
   box.innerHTML = '<div class="tw" style="max-height:340px;overflow:auto"><table class="densa">'
     + '<thead><tr><th style="width:34px"></th><th>Registro</th><th>Vencimento</th>'
     + '<th class="num">Em aberto</th><th class="num">Valor a usar</th></tr></thead><tbody>'
@@ -2917,9 +2950,11 @@ function pintarVinculos(movId){
           + '<td><input type="checkbox" '+(marcado?'checked':'')
             + ' style="width:16px;height:16px;accent-color:var(--brand)"'
             + ' onchange="marcarVinculo(\'' + movId + '\',\'' + c.id + '\',this.checked,' + c.valor + ')"></td>'
-          + '<td><b>'+esc(c.titulo)+'</b><div class="mini">'+esc(c.sub + (c.detalhe ? ' · ' + c.detalhe : ''))+'</div></td>'
+          + '<td><b>'+esc(c.titulo)+'</b><div class="mini">'+esc(c.sub + (c.detalhe ? ' · ' + c.detalhe : ''))+'</div>'
+            + (c.travado ? '<div class="mini"><span class="tag t-ni">✕ crédito do cliente ainda não conciliado</span></div>' : '')
+            + (c.semBoleto ? '<div class="mini"><span class="tag t-pend">sem boleto</span></div>' : '')+'</td>'
           + '<td>'+dataBR(c.venc)+'</td>'
-          + '<td class="num">'+nMoeda(c.valor)+'</td>'
+          + '<td class="num">'+(c.semBoleto ? '<span class="mini">—</span>' : nMoeda(c.valor))+'</td>'
           + '<td class="num">' + (marcado
               ? '<input value="'+nMoeda(VINC[c.id])+'" oninput="VINC[\'' + c.id + '\']=n(this.value)"'
                 + ' onblur="pintarVinculos(\'' + movId + '\')"'
@@ -2928,6 +2963,8 @@ function pintarVinculos(movId){
               : '<span class="mini">—</span>') + '</td></tr>';
       }).join('')
     + '</tbody></table></div>'
+    + (todos.length > cands.length
+        ? '<p class="mini" style="margin-top:6px">Mostrando 80 de '+todos.length+' — refine a busca.</p>' : '')
     + '<div class="barraSel" style="margin-top:12px"><b>'+Object.keys(VINC).length+'</b> selecionado(s) · '
     + 'soma ' + moeda(soma) + ' de ' + moeda(total)
     + (Math.abs(falta) < 0.01 ? ' · <span class="pos">fecha certo</span>'
@@ -2943,12 +2980,19 @@ function marcarVinculo(movId, id, marcado, aberto){
     const total = rd(Math.abs(n(m.VALOR)));
     const usado = rd(Object.keys(VINC).reduce((s,k) => s + rd(n(VINC[k])), 0));
     const falta = rd(total - usado);
-    VINC[id] = rd(Math.min(n(aberto), falta > 0 ? falta : n(aberto)));   // sugere o que falta
+    const ab = rd(n(aberto));
+    // conta sem boleto não tem valor lançado: usa o que falta do movimento
+    VINC[id] = ab > 0 ? rd(Math.min(ab, falta > 0 ? falta : ab)) : rd(falta > 0 ? falta : total);
   }
   pintarVinculos(movId);
 }
 function confirmarVinculos(movId){
-  const itens = Object.keys(VINC).map(id => ({id, valor:VINC[id]}));
+  const travados = Object.keys(VINC)
+    .map(id => (indices().cp.get(id) || null))
+    .filter(cp => cp && liberacao(cp).tipo === 'nao');
+  if (travados.length && !confirm(travados.length + ' repasse(s) selecionado(s) ainda não tiveram o crédito '
+      + 'do cliente conciliado.\n\nO débito já saiu da conta, então o pagamento aconteceu. Registrar a baixa mesmo assim?')) return;
+  const itens = Object.keys(VINC).map(id => ({id, valor:VINC[id], forcar:true}));
   fecharModal();
   return conciliarVarios(movId, itens);
 }
@@ -4700,6 +4744,11 @@ function telaRecebidas(){
     L.push({id:c.ID, tipo:'avulso', pasta:c.PASTA || '—', cliente:c.CLIENTE, proc:c.PRACA || '', desc:c.DESCRICAO, data:c.DATA_RECEB,
             valor:n(c.VALOR), cli:n(c.VALOR_CLIENTE),
             esc:n(c.VALOR_ESCRITORIO) || n(c.VALOR), tar:n(c.TARIFA), lanc:''}));
+  // o dinheiro entrou na conta, então o crédito conta no total do dia mesmo
+  // sem origem definida; a destinação é que fica pendente
+  naoId.filter(m => !ehDebito(m)).forEach(m =>
+    L.push({id:m.ID, tipo:'naoid', pasta:'—', cliente:'', proc:'', desc:m.IDENTIFICACAO || 'Depósito não identificado',
+            data:m.DATA, valor:Math.abs(n(m.VALOR)), cli:0, esc:0, tar:0, lanc:'', obs:m.OBS||''}));
 
   L = L.filter(r => entreDatas(r.data, FILTROS.rcDe, FILTROS.rcAte))
        .filter(r => contem([r.pasta, r.cliente, r.desc].join(' '), FILTROS.rcBusca))
@@ -4715,6 +4764,11 @@ function telaRecebidas(){
     + kpi('Receita do escritório', moeda(L.reduce((s,r)=>s+r.esc,0)), 'inclui as tarifas', 'd')
     + kpi('Tarifas bancárias', moeda(L.reduce((s,r)=>s+r.tar,0)), 'do cliente para o escritório', '')
     + '</div>'
+    + (L.some(r => r.tipo === 'naoid')
+        ? '<div class="kpis"><div class="kpi n"><div class="rot">Sem origem definida</div>'
+          + '<div class="val">'+moeda(L.filter(r => r.tipo==='naoid').reduce((s,r)=>s+r.valor,0))+'</div>'
+          + '<div class="sub">'+L.filter(r => r.tipo==='naoid').length+' depósito(s) no total acima, ainda a identificar</div></div></div>'
+        : '')
     + '<div class="filtros">'
     + campoData('rcDe','Crédito de') + campoData('rcAte','até')
     + campoTexto('rcBusca','Pasta, cliente ou descrição','buscar…')
@@ -4723,7 +4777,19 @@ function telaRecebidas(){
     + '</div>'
     + '<div class="card"><div class="tw"><table><thead><tr><th>Crédito</th><th>Pasta / cliente</th><th>Descrição</th>'
     + '<th class="num">Valor</th><th class="num">Cliente</th><th class="num">Tarifa</th><th class="num">Escritório</th><th></th></tr></thead><tbody>'
-    + (L.length ? L.map(r => '<tr><td>'+dataBR(r.data)+'</td>'
+    + (L.length ? L.map(r => r.tipo === 'naoid'
+      ? '<tr class="grifo"><td>'+dataBR(r.data)+'</td>'
+        + '<td><span class="tag t-ni">não identificado</span></td>'
+        + '<td>'+esc(r.desc)+(r.obs ? '<div class="mini" style="color:var(--brass)">'+esc(r.obs)+'</div>' : '')+'</td>'
+        + '<td class="num">'+nMoeda(r.valor)+'</td>'
+        + '<td class="num"><span class="mini">a definir</span></td>'
+        + '<td class="num">—</td>'
+        + '<td class="num"><span class="mini">a definir</span></td>'
+        + '<td style="text-align:right;white-space:nowrap">'
+        + '<button class="btn sm sec" onclick="irPara(\'recebidas\',\'naoid\')">Identificar</button> '
+        + '<button class="btn sm sec" onclick="formObsMov(\''+r.id+'\')">Observações</button>'
+        + '</td></tr>'
+      : '<tr><td>'+dataBR(r.data)+'</td>'
       + '<td>'+pastaCliente(r.pasta, r.cliente)+'</td><td>'+esc(r.desc)+'</td>'
       + '<td class="num">'+nMoeda(r.valor)+'</td>'
       + '<td class="num">'+nMoeda(r.cli)+'<div class="mini">'+pctSobre(rd(r.cli + r.tar), r.valor)+'</div></td>'
@@ -5107,9 +5173,11 @@ function telaPagar(){
 let REC_TMP = [];
 function formCP(id){
   const c = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id) || {};
-  if (c.STATUS === 'Pago') return toast('Esta conta já foi baixada pelo extrato. Desfaça a conciliação para alterá-la.','erro');
+  // conta paga pode ser corrigida — categoria, favorecido, descrição —, mas o
+  // valor é o que saiu da conta e fica travado até a conciliação ser desfeita
+  const paga = c.STATUS === 'Pago';
   REC_TMP = [];
-  modal(id ? 'Editar conta a pagar' : 'Lançar nova conta a pagar',
+  modal(id ? (paga ? 'Editar conta paga' : 'Editar conta a pagar') : 'Lançar nova conta a pagar',
     '<div class="grade">' + inp('cpDesc','Descrição', c.DESCRICAO, 'full')
     + '<div class="campo"><label for="cpFav">Favorecido</label><div style="display:flex;gap:6px">'
       + '<input id="cpFav" list="dlFav" autocomplete="off" value="'+esc(c.FAVORECIDO||'')+'" placeholder="digite para buscar" oninput="favEscolhido()" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r)">'
@@ -5120,8 +5188,18 @@ function formCP(id){
     + '<div class="campo" id="boxSubcatCP" style="padding:0;margin:0"></div>'
     + '<div class="campo" id="boxPastaCP" style="padding:0;margin:0"></div>'
     + inp('cpVenc','Vencimento', c.VENCIMENTO || hoje(), '', 'date', 'onchange="avisoDiaUtil(this.value)"')
-    + inp('cpValor','Valor (R$)', c.VALOR ? nMoeda(c.VALOR) : '')
+    + (paga
+        ? '<div class="campo"><label for="cpValor">Valor pago (R$)</label>'
+          + '<input id="cpValor" value="'+nMoeda(c.VALOR)+'" disabled '
+          + 'title="Valor conciliado no extrato — desfaça a conciliação para alterá-lo"></div>'
+        : inp('cpValor','Valor (R$)', c.VALOR ? nMoeda(c.VALOR) : ''))
     + '<div class="campo full" id="avisoUtil" style="padding:0;margin:0"></div>'
+    + (paga
+        ? '<div class="campo full"><p class="mini" style="color:var(--brass)">Conta paga em '
+          + dataBR(c.DATA_PGTO) + ' — <b>'+moeda(c.VALOR)+'</b> conciliados no extrato. '
+          + 'Dá para corrigir descrição, favorecido, categoria, subcategoria e observações; '
+          + 'o valor e a data do pagamento só mudam desfazendo a conciliação.</p></div>'
+        : '')
     + '<div class="check full"><input type="checkbox" id="cpSemDados"'+(String(c.SEM_DADOS||'').toUpperCase()==='SIM'?' checked':'')+'>'
       + '<label for="cpSemDados">Não consta dados bancários — o cliente ainda não informou a conta para o repasse</label></div>'
     + '<div class="campo full"><label for="cpObs">Observações</label><textarea id="cpObs" rows="2">'+esc(c.OBS||'')+'</textarea></div>'
@@ -5141,8 +5219,9 @@ function formCP(id){
         '<div class="check full"><input type="checkbox" id="cpRec" onchange="toggleRec()"><label for="cpRec">Conta recorrente — este favorecido tem boleto todo mês</label></div>'
       + '<div class="full" id="boxRec"></div>')
     + '</div>'
-    + '<p class="mini" style="margin-top:8px">A conta é dada como paga apenas quando o débito correspondente for conciliado no extrato.</p>',
-    '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" onclick="gravarCP(\''+(id||'')+'\')">Salvar conta</button>');
+    + (paga ? '' : '<p class="mini" style="margin-top:8px">A conta é dada como paga apenas quando o débito correspondente for conciliado no extrato.</p>'),
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn" onclick="gravarCP(\''+(id||'')+'\')">Salvar conta</button>');
   montaSubcat('cpCat', 'boxSubcatCP', 'cpSubcat', c.SUBCATEGORIA);
   montaPastaCP(c.PASTA);
   if (c.LINHA_DIGITAVEL) pintarLinha(c.LINHA_DIGITAVEL, 'gravado nesta conta');
@@ -5195,8 +5274,9 @@ function pintarRec(){
 async function gravarCP(id){
   const recorrente = !id && val('cpRec') && REC_TMP.length;
   if (!val('cpDesc')) return toast('Informe a descrição.','erro');
-  if (!recorrente && !n(val('cpValor'))) return toast('Informe o valor.','erro');
   const atual = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id) || {};
+  const paga = atual.STATUS === 'Pago';
+  if (!recorrente && !paga && !n(val('cpValor'))) return toast('Informe o valor.','erro');
   const comum = { DESCRICAO:tit(val('cpDesc')), FAVORECIDO:tit(val('cpFav')), CATEGORIA:val('cpCat'),
                   SUBCATEGORIA:val('cpSubcat'), PASTA: tit(val('cpPasta')),
                   SEM_DADOS: val('cpSemDados') ? 'SIM' : '', OBS:val('cpObs'),
@@ -5220,15 +5300,15 @@ async function gravarCP(id){
     try{ await salvarLoteRapido(lote); toast(lote.length + ' contas recorrentes lançadas e salvas.','ok'); }catch(e){}
     return;
   }
-  const novoValor = rd(n(val('cpValor')));
+  const novoValor = paga ? rd(n(atual.VALOR)) : rd(n(val('cpValor')));
   // mudar o valor de um repasse redistribui o crédito de origem
-  const ajuste = ajustarOrigemDoRepasse(atual, novoValor);
+  const ajuste = paga ? null : ajustarOrigemDoRepasse(atual, novoValor);
   if (ajuste && ajuste.erro) return toast(ajuste.erro,'erro');
 
   fecharModal();
   try{
     const cp = {aba:'CONTAS_PAGAR', registro: Object.assign({}, atual, comum, {ID:id||uid('cp'),
-      VENCIMENTO:proximoDiaUtil(val('cpVenc')), VALOR:novoValor,
+      VENCIMENTO: paga ? atual.VENCIMENTO : proximoDiaUtil(val('cpVenc')), VALOR:novoValor,
       STATUS: atual.STATUS || 'Em aberto', DATA_PGTO: atual.DATA_PGTO || '',
       ORIGEM: atual.ORIGEM || 'Manual', PARCELA_ID: atual.PARCELA_ID || '', ANEXO_URL: anexo})};
     if (ajuste) cp.registro.OBS = ajuste.obs;
@@ -5854,12 +5934,23 @@ function exportarCSV(qual){
         nMoeda(p.VALOR), nMoeda(rd(n(p.VALOR) - ep - tf)), nMoeda(rd(ep + tf))]);
     });
   } else if (qual === 'contas-recebidas'){
-    cab = ['Crédito','Pasta','Cliente','Descrição','Valor','Cliente','Tarifa','Escritório'];
+    cab = ['Crédito','Pasta','Cliente','Descrição','Valor','Cliente','Tarifa','Escritório','Situação'];
+    const linhasRec = [];
     (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida').forEach(p => {
       const l = lancDe(p.LANC_ID);
-      linhas.push([dataBR(p.DATA_CREDITO), l.PASTA, l.CLIENTE, p.TIPO+(p.NUM>0?' '+p.NUM:''),
-        nMoeda(p.VALOR_CREDITADO||p.VALOR), nMoeda(p.VALOR_CLIENTE), nMoeda(p.TARIFA), nMoeda(p.VALOR_ESCRITORIO)]);
+      linhasRec.push([p.DATA_CREDITO, l.PASTA, l.CLIENTE, p.TIPO+(p.NUM>0?' '+p.NUM:''),
+        nMoeda(p.VALOR_CREDITADO||p.VALOR), nMoeda(p.VALOR_CLIENTE), nMoeda(p.TARIFA),
+        nMoeda(p.VALOR_ESCRITORIO), 'identificado']);
     });
+    (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido').forEach(c =>
+      linhasRec.push([c.DATA_RECEB, c.PASTA || '', c.CLIENTE || '', c.DESCRICAO || '',
+        nMoeda(c.VALOR), nMoeda(c.VALOR_CLIENTE), nMoeda(c.TARIFA),
+        nMoeda(n(c.VALOR_ESCRITORIO) || n(c.VALOR)), 'identificado']));
+    (DB.EXTRATO||[]).filter(m => m.STATUS === 'Nao identificado' && !ehDebito(m)).forEach(m =>
+      linhasRec.push([m.DATA, '', '', m.IDENTIFICACAO || 'Depósito não identificado',
+        nMoeda(Math.abs(n(m.VALOR))), '', '', '', 'nao identificado']));
+    linhasRec.sort((a,b) => String(b[0]).localeCompare(String(a[0])))
+      .forEach(l => linhas.push([dataBR(l[0])].concat(l.slice(1))));
   } else if (qual === 'contas-a-pagar'){
     cab = ['Recebido do cliente','Vencimento','Descrição','Favorecido','Categoria','Valor'];
     (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago').forEach(c => { const lb = liberacao(c);
@@ -6041,7 +6132,9 @@ function telaPagas(){
       + (c.ORIGEM && c.ORIGEM !== 'Manual' ? '<div class="mini">'+esc(c.ORIGEM)+'</div>' : '') + '</td>'
       + '<td>'+esc(c.FAVORECIDO||'—')+'</td><td>'+esc(c.CATEGORIA||'—')+'</td>'
       + '<td class="num">'+nMoeda(c.VALOR)+'</td>'
-      + '<td style="text-align:right;white-space:nowrap">'+botaoDesfazerPago(c)
+      + '<td style="text-align:right;white-space:nowrap">'
+      + '<button class="btn sm sec" onclick="formCP(\''+c.ID+'\')">Editar</button> '
+      + botaoDesfazerPago(c)
       + ' <button class="btn sm per" onclick="apagarSimples(\'CONTAS_PAGAR\',\''+c.ID+'\')">Excluir</button></td></tr>').join('')
       : '<tr><td colspan="7">'+vazio('Nenhuma conta paga','As contas aparecem aqui quando o débito correspondente é conciliado no extrato.')+'</td></tr>')
     + '</tbody></table></div></div>';
