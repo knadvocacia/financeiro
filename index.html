@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v8.2';
+const VERSAO_APP = 'v8.3';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -3415,6 +3415,7 @@ function formNovoNaConciliacao(movId){
     + sel('ncCat','Categoria', opcoesCategorias(deb ? 'D' : 'C', '', '— selecione —'), '', '',
         'onchange="mudouCategoriaNC(' + (deb ? 'true' : 'false') + ')"')
     + '<div class="campo" id="boxSubcatNC" style="padding:0;margin:0"></div>'
+    + (deb ? '<div class="campo" id="boxPastaNC" style="padding:0;margin:0"></div>' : '')
     + inp('ncVenc', deb ? 'Vencimento' : 'Data', m.DATA, '', 'date')
     + '<div class="campo" id="boxValorNC">' + (deb
         ? '<label for="ncValor">Valor (R$)</label><input id="ncValor" value="'+esc(valor)+'">'
@@ -3438,6 +3439,7 @@ function mudouCategoriaNC(deb){
   const c = document.getElementById('ncCat');
   if (deb && c) c.dataset.tocado = 1;
   montaSubcat('ncCat', 'boxSubcatNC', 'ncSubcat', '');
+  if (deb) montaPasta('ncCat', 'boxPastaNC', 'ncPastaCP', '');
   // no acordo CPC os valores vêm da tabela de parcelas, então o campo de valor sai da tela
   const bv = document.getElementById('boxValorNC');
   if (bv) bv.style.display = (!deb && catCPC(val('ncCat'))) ? 'none' : '';
@@ -3594,7 +3596,8 @@ async function gravarNovoNaConciliacao(movId){
     const fav = garantirFavorecido(tit(val('ncQuem')), val('ncCat'));
     if (fav) lote.push(fav);
     lote.push({aba:'CONTAS_PAGAR', registro:{ID:id, DESCRICAO:tit(val('ncDesc')), FAVORECIDO:tit(val('ncQuem')),
-      CATEGORIA:val('ncCat'), SUBCATEGORIA:val('ncSubcat'), VENCIMENTO:proximoDiaUtil(val('ncVenc')), VALOR:valor,
+      CATEGORIA:val('ncCat'), SUBCATEGORIA:val('ncSubcat'), PASTA: tit(val('ncPastaCP')),
+      VENCIMENTO:proximoDiaUtil(val('ncVenc')), VALOR:valor,
       STATUS:'Em aberto', DATA_PGTO:'', ORIGEM:'Lançado na conciliação', PARCELA_ID:'', ANEXO_URL:'',
       OBS:val('ncObs'), SEM_DADOS:''}});
   } else if (catAcordo(val('ncCat'))){
@@ -5223,13 +5226,16 @@ function mudouCategoriaCP(){
   montaSubcat('cpCat','boxSubcatCP','cpSubcat','');
   montaPastaCP('');
 }
-function montaPastaCP(atual){
-  const box = document.getElementById('boxPastaCP'); if (!box) return;
-  if (val('cpCat') !== 'Repasse a cliente' && !atual){ box.innerHTML = ''; return; }
-  box.innerHTML = '<label for="cpPasta">Pasta do cliente</label>'
-    + '<input id="cpPasta" list="dlPastasCP" autocomplete="off" value="'+esc(atual||'')+'" '
+const montaPastaCP = atual => montaPasta('cpCat', 'boxPastaCP', 'cpPasta', atual);
+/* campo de pasta, que aparece quando a categoria é o repasse ao cliente */
+function montaPasta(idCat, idBox, idCampo, atual){
+  const box = document.getElementById(idBox); if (!box) return;
+  if (val(idCat) !== 'Repasse a cliente' && !atual){ box.innerHTML = ''; return; }
+  const lista = idCampo + 'Lista';
+  box.innerHTML = '<label for="'+idCampo+'">Pasta do cliente</label>'
+    + '<input id="'+idCampo+'" list="'+lista+'" autocomplete="off" value="'+esc(atual||'')+'" '
     + 'placeholder="número da pasta">'
-    + '<datalist id="dlPastasCP">'
+    + '<datalist id="'+lista+'">'
     + [...new Set((DB.LANCAMENTOS||[]).map(l => l.PASTA).filter(Boolean))]
         .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'))
         .map(p => '<option value="'+esc(p)+'"></option>').join('')
