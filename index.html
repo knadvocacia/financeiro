@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v8.0';
+const VERSAO_APP = 'v8.2';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -717,7 +717,8 @@ function irPara(k, sub){
 }
 
 function pintarNav(){
-  const pend = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Pendente' || m.STATUS === 'Nao identificado').length;
+  // só o que falta conciliar: depósitos não identificados já foram tratados
+  const pend = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Pendente').length;
   const visiveis = MODULOS.filter(m => m.g || podeVer(m.k));
   $('#nav').innerHTML = visiveis.map((m, i) => {
     // não mostra um título de grupo que ficou sem nenhuma aba embaixo
@@ -2253,14 +2254,122 @@ function loteAcordo(d){
    cumprido, então aquelas previsões não valem mais. Nada é apagado — os
    registros ficam guardados no relatório de execução. */
 const emExecucao = lancId => String((lancDe(lancId)||{}).EXECUCAO||'').toUpperCase() === 'SIM';
+/* acordo firmado mas ainda sem homologação do juízo: sai das listas até sair a decisão */
+const aguardaHomolog = lancId => String((lancDe(lancId)||{}).HOMOLOG||'').toUpperCase() === 'SIM';
+const lancsAguardando = () => (DB.LANCAMENTOS||[]).filter(l => aguardaHomolog(l.ID) && !emExecucao(l.ID));
 function lancDoCP(c){
   if (!c || !c.PARCELA_ID) return '';
   const p = parcDe(c.PARCELA_ID);
   return p ? p.LANC_ID : '';
 }
 const cpEmExecucao = c => emExecucao(lancDoCP(c));
+const cpAguardando = c => aguardaHomolog(lancDoCP(c));
 const lancsEmExecucao = () => (DB.LANCAMENTOS||[]).filter(l => emExecucao(l.ID));
 const contasSemDados = () => (DB.CONTAS_PAGAR||[]).filter(c => semDadosCP(c) && !cpEmExecucao(c));
+
+/* marca a pasta como aguardando homologação: as parcelas saem das listas
+   até o juízo homologar o acordo */
+function marcarHomologacao(lancId){
+  const l = lancDe(lancId);
+  if (!l.ID) return toast('Lançamento não encontrado.','erro');
+  if (aguardaHomolog(lancId)) return formHomologar(lancId);
+  if (emExecucao(lancId)) return toast('Esta pasta está em execução. Tire-a da execução antes.','erro');
+  const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === lancId && p.STATUS !== 'Recebida');
+  const cps = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && lancDoCP(c) === lancId);
+  const soma = arr => arr.reduce((s,x) => s + n(x.VALOR), 0);
+  modal('Aguardando homologação — ' + (l.PASTA || '—'),
+    '<p>' + pastaCliente(l.PASTA, l.CLIENTE) + (l.N_PROCESSO ? '<div class="mini">'+esc(l.N_PROCESSO)+'</div>' : '') + '</p>'
+    + '<p style="margin-top:10px">O acordo foi firmado mas ainda não foi homologado. Enquanto espera, saem das listas:</p>'
+    + '<div class="tw" style="margin-top:8px"><table class="densa"><tbody>'
+    + '<tr><td>Parcelas em contas a receber</td><td class="num">'+parc.length+'</td>'
+      + '<td class="num">'+nMoeda(soma(parc))+'</td></tr>'
+    + '<tr><td>Repasses em contas a pagar</td><td class="num">'+cps.length+'</td>'
+      + '<td class="num">'+nMoeda(soma(cps))+'</td></tr>'
+    + '</tbody></table></div>'
+    + '<div class="campo" style="margin-top:12px"><label for="hmObs">Observações (opcional)</label>'
+    + '<textarea id="hmObs" rows="2" placeholder="data da audiência, número do protocolo, o que falta…"></textarea></div>'
+    + '<p class="mini">Nada é apagado: tudo fica na lista de acordos aguardando homologação, na aba Contas a receber, '
+    + 'e volta assim que o acordo for homologado.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn" onclick="gravarHomolog(\''+lancId+'\',1)">Marcar como aguardando</button>', 'estreita');
+}
+function formHomologar(lancId){
+  const l = lancDe(lancId);
+  const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === lancId && p.STATUS !== 'Recebida');
+  modal('Acordo homologado — ' + (l.PASTA || '—'),
+    '<p>' + pastaCliente(l.PASTA, l.CLIENTE) + '</p>'
+    + '<p style="margin-top:10px">Aguardando homologação desde <b>'+dataBR(l.HOMOLOG_DATA)+'</b>.'
+    + (l.HOMOLOG_OBS ? '<div class="mini" style="margin-top:6px">'+esc(l.HOMOLOG_OBS)+'</div>' : '') + '</p>'
+    + '<p class="mini" style="margin-top:10px">Confirmando, as <b>'+parc.length+'</b> parcela(s) voltam para contas a receber '
+    + 'e os repasses voltam para contas a pagar. Confira os vencimentos depois, caso o acordo tenha sido homologado com outras datas.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn ok" onclick="gravarHomolog(\''+lancId+'\',0)">Foi homologado — voltar para as listas</button>', 'estreita');
+}
+function gravarHomolog(lancId, entrar){
+  const l = lancDe(lancId); if (!l.ID) return;
+  const obs = entrar ? val('hmObs') : '';
+  fecharModal();
+  salvarLoteRapido([{aba:'LANCAMENTOS', registro: Object.assign({}, l, {
+    HOMOLOG: entrar ? 'SIM' : '',
+    HOMOLOG_DATA: entrar ? hoje() : '',
+    HOMOLOG_OBS: entrar ? obs : '' })}]);
+  toast(entrar ? 'Pasta ' + (l.PASTA||'') + ' aguardando homologação — saiu de contas a receber e a pagar.'
+               : 'Acordo homologado — pasta ' + (l.PASTA||'') + ' voltou para as listas.', 'ok');
+}
+
+/* ── lista dos acordos que esperam homologação ── */
+function relatorioHomologacao(){
+  const L = lancsAguardando()
+    .sort((a,b) => String(a.HOMOLOG_DATA).localeCompare(String(b.HOMOLOG_DATA)));
+  if (!L.length) return '<div class="card">'
+    + vazio('Nenhum acordo aguardando homologação',
+            'Use o botão ⏳ em contas a receber para marcar uma pasta cujo acordo ainda não foi homologado.')
+    + '</div>';
+  const soma = arr => arr.reduce((s,x) => s + n(x.VALOR), 0);
+  let totReceber = 0, totPagar = 0;
+  const blocos = L.map(l => {
+    const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === l.ID).sort((a,b) => n(a.NUM) - n(b.NUM));
+    const aReceber = parc.filter(p => p.STATUS !== 'Recebida');
+    const cps = (DB.CONTAS_PAGAR||[]).filter(c => lancDoCP(c) === l.ID && c.STATUS !== 'Pago');
+    totReceber = rd(totReceber + soma(aReceber));
+    totPagar = rd(totPagar + soma(cps));
+    const dias = Math.round(diasEntre(l.HOMOLOG_DATA, hoje()));
+    return '<div class="card"><h3>' + esc(l.PASTA || '—') + ' · ' + esc(l.CLIENTE || '—')
+      + '<span style="float:right;font-weight:400;font-size:11.5px;color:var(--ink2)">aguardando desde '
+      + dataBR(l.HOMOLOG_DATA) + (dias > 0 ? ' · ' + dias + ' dia(s)' : '') + '</span></h3>'
+      + '<div class="corpo">'
+      + (l.N_PROCESSO ? '<div class="mini">Processo ' + esc(l.N_PROCESSO) + (l.PRACA ? ' · ' + esc(l.PRACA) : '') + '</div>' : '')
+      + (l.HOMOLOG_OBS ? '<div class="mini" style="color:var(--brass);margin-top:4px">' + esc(l.HOMOLOG_OBS) + '</div>' : '')
+      + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+      + '<button class="btn sm ok" onclick="marcarHomologacao(\''+l.ID+'\')">Foi homologado</button>'
+      + '<button class="btn sm sec" onclick="verParcelas(\''+l.ID+'\')">Ver pasta</button>'
+      + '<button class="btn sm sec" onclick="formLanc(\''+l.ID+'\')">Editar</button>'
+      + '</div></div>'
+      + '<div class="tw"><table class="densa"><thead><tr><th>Parcelas do acordo</th><th>Vencimento</th>'
+      + '<th class="num">Valor</th><th class="num">Cliente</th><th class="num">Escritório</th></tr></thead><tbody>'
+      + (parc.length ? parc.map(p => '<tr>'
+          + '<td>'+esc(p.TIPO + (n(p.NUM)>0 ? ' ' + n(p.NUM) : ''))+'</td>'
+          + '<td>'+dataBR(p.VENCIMENTO)+'</td>'
+          + '<td class="num">'+nMoeda(p.VALOR)+'</td>'
+          + '<td class="num">'+nMoeda(rd(n(p.VALOR) - escPrevisto(p, l) - tarifaDe(p, l)))+'</td>'
+          + '<td class="num">'+nMoeda(rd(escPrevisto(p, l) + tarifaDe(p, l)))+'</td></tr>').join('')
+        : '<tr><td colspan="5" class="mini">Sem parcelas lançadas.</td></tr>')
+      + '</tbody><tfoot><tr><th colspan="2" style="text-align:right">Fora das listas enquanto espera</th>'
+      + '<th class="num">'+nMoeda(soma(aReceber))+'</th><th colspan="2"></th></tr></tfoot></table></div>'
+      + '</div>';
+  }).join('');
+
+  return '<div class="kpis">'
+    + kpi('Aguardando homologação', L.length, 'acordo(s) firmado(s)', 'b')
+    + kpi('A receber suspenso', moeda(totReceber), 'parcelas fora de contas a receber', 'd')
+    + kpi('A pagar suspenso', moeda(totPagar), 'repasses fora de contas a pagar', '')
+    + kpi('Mais antigo', L.length ? Math.round(diasEntre(L[0].HOMOLOG_DATA, hoje())) + ' dias' : '—',
+          'esperando desde ' + (L.length ? dataBR(L[0].HOMOLOG_DATA) : '—'), 'n')
+    + '</div>'
+    + '<p class="mini" style="margin:-6px 0 14px">Nada foi apagado: as parcelas e os repasses voltam para as listas '
+    + 'assim que o acordo for homologado.</p>'
+    + blocos;
+}
 
 /* manda a pasta para execução: pede o motivo e mostra o que sai das listas */
 function marcarExecucao(lancId){
@@ -2411,7 +2520,8 @@ function relatorioSemDados(){
 }
 
 function pendentesReceber(){
-  return (DB.PARCELAS||[]).filter(p => p.STATUS !== 'Recebida' && !emExecucao(p.LANC_ID));
+  return (DB.PARCELAS||[])
+    .filter(p => p.STATUS !== 'Recebida' && !emExecucao(p.LANC_ID) && !aguardaHomolog(p.LANC_ID));
 }
 function trechosNum(txt, min){
   const out = new Set();
@@ -2656,7 +2766,35 @@ function mostrarTodosPendentes(total){
 }
 function listaNaoIdentificados(L){
   if (!L.length) return '<div class="card">'+vazio('Nenhum movimento não identificado','Depósitos sem origem aparecem aqui com sugestões de pastas de mesmo valor.')+'</div>';
-  return L.sort((a,b) => String(a.DATA).localeCompare(String(b.DATA))).map(m =>
+  const F = L.filter(m => entreDatas(m.DATA, FILTROS.niDe, FILTROS.niAte))
+             .filter(m => contem(m.IDENTIFICACAO + ' ' + (m.OBS||''), FILTROS.niBusca))
+             .filter(m => entreValores(Math.abs(n(m.VALOR)), FILTROS.niMin, FILTROS.niMax));
+  const creditos = F.filter(m => !ehDebito(m));
+  const somaCred = rd(creditos.reduce((s,m) => s + Math.abs(n(m.VALOR)), 0));
+  const somaDeb = rd(F.filter(ehDebito).reduce((s,m) => s + Math.abs(n(m.VALOR)), 0));
+  const datas = F.map(m => m.DATA).filter(Boolean).sort();
+  const filtrando = FILTROS.niDe || FILTROS.niAte || FILTROS.niBusca || FILTROS.niMin || FILTROS.niMax;
+
+  const topo = '<div class="kpis">'
+    + kpi('Total não identificado', moeda(somaCred),
+          creditos.length + ' depósito(s)' + (filtrando ? ' no filtro' : ''), creditos.length ? 'n' : '')
+    + kpi('Período', datas.length ? dataBR(datas[0]) + ' a ' + dataBR(datas[datas.length-1]) : '—',
+          'do mais antigo ao mais recente', 'd')
+    + (somaDeb
+        ? kpi('Débitos sem origem', moeda(somaDeb), F.filter(ehDebito).length + ' movimento(s)', 'b')
+        : kpi('Movimentos', F.length, filtrando ? 'de ' + L.length + ' no total' : 'a identificar', 'b'))
+    + '</div>'
+    + '<div class="filtros">'
+    + campoData('niDe','Crédito de') + campoData('niAte','até')
+    + campoTexto('niBusca','Histórico ou observação','buscar…')
+    + campoValor('niMin','Valor de') + campoValor('niMax','Valor até')
+    + botaoLimpar(['niDe','niAte','niBusca','niMin','niMax'])
+    + '</div>';
+
+  if (!F.length) return topo + '<div class="card">'
+    + vazio('Nada neste filtro','Ajuste as datas, o valor ou a busca.')+'</div>';
+
+  return topo + F.sort((a,b) => String(a.DATA).localeCompare(String(b.DATA))).map(m =>
     '<div class="card fino"><div class="corpo conc">'
     + ladoMovimento(m, '<button class="btn sm sec" onclick="voltarPendente(\''+m.ID+'\')">Voltar para pendentes</button>'
                      + '<button class="btn sm sec" onclick="formObsMov(\''+m.ID+'\')">Observações</button>')
@@ -3841,8 +3979,8 @@ function formatarLinha(d){
 }
 async function lerBoleto(inp){
   const box = document.getElementById('boxLinha');
-  const f = inp && inp.files && inp.files[0];
-  if (!f || !/\.pdf$/i.test(f.name)) return;
+  const f = inp && inp.files ? [...inp.files].find(x => /\.pdf$/i.test(x.name)) : null;
+  if (!f) return;
   if (box) box.innerHTML = '<p class="mini">Lendo o boleto…</p>';
   try{
     const r = acharLinhaDigitavel(await textoPDF(f));
@@ -4654,9 +4792,21 @@ function telaReceber(){
   const todosMarcados = L.length > 0 && SELR.size === L.length;
   const selecionados = L.filter(r => SELR.has(r.id));
 
+  const aguardando = lancsAguardando();
+  const abasR = subtabs([['abertas','Em aberto'],
+                         ['homolog','⏳ Aguardando homologação ('+aguardando.length+')']]);
+  if ((SUB || 'abertas') === 'homolog'){
+    return cabec('Contas a receber', 'Acordos firmados que ainda não foram homologados pelo juízo.',
+        '<button class="btn sec" onclick="exportarCSV(\'aguardando-homologacao\')">Exportar CSV</button>')
+      + abasR + relatorioHomologacao();
+  }
+
   return cabec('Contas a receber', 'Parcelas em aberto. A baixa só acontece ao conciliar o crédito no extrato bancário.',
       '<button class="btn sec" onclick="formCR()">Nova conta a receber</button>'
+    + '<button class="btn sec" onclick="irPara(\'receber\',\'homolog\')">⏳ Aguardando homologação'
+      + (aguardando.length ? ' (' + aguardando.length + ')' : '') + '</button>'
     + '<button class="btn sec" onclick="exportarCSV(\'contas-a-receber\')">Exportar CSV</button>')
+    + abasR
     + '<div class="kpis">'
     + kpi('Em aberto', moeda(total), L.length + ' lançamento(s)', 'd')
     + kpi('Vencidas', moeda(vencidas.reduce((s,r)=>s+r.valor,0)), vencidas.length + ' em atraso', vencidas.length ? 'n' : '')
@@ -4688,6 +4838,8 @@ function telaReceber(){
       + (r.tipo === 'parcela' ? '<button class="btn sm sec" onclick="formLanc(\''+r.lanc+'\')">Abrir</button> '
             + '<button class="btn sm sec" title="Acordo não cumprido — mandar esta pasta para execução" '
             + 'onclick="marcarExecucao(\''+r.lanc+'\')">⚖</button> '
+            + '<button class="btn sm sec" title="Acordo aguardando homologação — suspender esta pasta" '
+            + 'onclick="marcarHomologacao(\''+r.lanc+'\')">⏳</button> '
                               : '<button class="btn sm sec" onclick="formCR(\''+r.id+'\')">Editar</button> ')
       + '<button class="btn sm per" onclick="excluirReceber([\''+r.id+'\'])">Excluir</button>'
       + '</td></tr>').join('')
@@ -5027,12 +5179,44 @@ async function enviarAnexo(arquivo, refTipo, refId){
     return j.url;
   } finally { carregandoOff(); }
 }
-async function removerAnexoCP(id){
+/* Uma conta pode ter vários anexos: boleto, comprovante, nota.
+   Ficam no mesmo campo, separados por | , sem mudar a planilha. */
+const anexosDe = c => String((c && c.ANEXO_URL) || '').split('|').map(s => s.trim()).filter(Boolean);
+const juntarAnexos = lista => [...new Set((lista||[]).filter(Boolean))].join('|');
+/* nome legível a partir do que foi gravado: "nome::url" ou só a url */
+const nomeAnexo = (a, i) => {
+  const p = String(a).split('::');
+  return p.length > 1 ? p[0] : ('Arquivo ' + (i+1));
+};
+const urlAnexo = a => { const p = String(a).split('::'); return p.length > 1 ? p.slice(1).join('::') : String(a); };
+
+async function removerAnexoCP(id, indice){
   const c = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id); if (!c) return;
-  if (!confirm('Remover o boleto desta conta? O arquivo continua no Google Drive.')) return;
-  fecharModal();
-  try{ await salvarLoteRapido([{aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {ANEXO_URL:''})}]);
-       toast('Boleto removido da conta.','ok'); }catch(e){}
+  const lista = anexosDe(c);
+  const i = Number(indice);
+  const alvo = isNaN(i) ? -1 : i;
+  if (alvo < 0 || alvo >= lista.length) return;
+  if (!confirm('Remover "' + nomeAnexo(lista[alvo], alvo) + '" desta conta? O arquivo continua no Google Drive.')) return;
+  lista.splice(alvo, 1);
+  const novo = Object.assign({}, c, {ANEXO_URL: juntarAnexos(lista)});
+  salvarLoteRapido([{aba:'CONTAS_PAGAR', registro: novo}]);
+  const box = document.getElementById('boxAnexos');
+  if (box) box.innerHTML = listaAnexosHTML(novo);
+  toast('Anexo removido da conta.','ok');
+}
+/* lista dos anexos já gravados, dentro do formulário */
+function listaAnexosHTML(c){
+  const lista = anexosDe(c);
+  if (!lista.length) return '<p class="mini" style="margin-top:5px">Nenhum anexo ainda. '
+    + 'Os arquivos ficam na pasta do sistema no Google Drive; sendo PDF, o sistema lê a linha digitável.</p>';
+  return '<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">'
+    + lista.map((a,i) => '<div style="display:flex;align-items:center;gap:8px;font-size:12.5px">'
+      + '<span>📎</span>'
+      + '<a href="'+esc(urlAnexo(a))+'" target="_blank" rel="noopener" style="flex:1">'+esc(nomeAnexo(a,i))+'</a>'
+      + '<button class="btn sm sec" onclick="removerAnexoCP(\''+(c.ID||'')+'\','+i+')">Remover</button>'
+      + '</div>').join('')
+    + '</div>'
+    + '<p class="mini" style="margin-top:5px">'+lista.length+' anexo(s). Escolher novos arquivos acrescenta — não substitui.</p>';
 }
 /* o repasse ao cliente ganha o campo de pasta, para ligar a conta ao processo */
 function mudouCategoriaCP(){
@@ -5106,7 +5290,7 @@ function telaPagar(){
   // contas pagas saem daqui e vão para a aba Contas pagas
   const base = (DB.CONTAS_PAGAR||[])
     .filter(c => c.STATUS !== 'Pago')
-    .filter(c => !cpEmExecucao(c))
+    .filter(c => !cpEmExecucao(c) && !cpAguardando(c))
     .filter(c => entreDatas(c.VENCIMENTO, FILTROS.apDe, FILTROS.apAte))
     .filter(c => contem([c.DESCRICAO, c.FAVORECIDO, c.SUBCATEGORIA].join(' '), FILTROS.apBusca))
     .filter(c => !FILTROS.apCat || c.CATEGORIA === FILTROS.apCat)
@@ -5148,7 +5332,9 @@ function telaPagar(){
     + (L.length ? L.map(c => '<tr'+(c.VENCIMENTO<hj && liberacao(c).tipo!=='nao' ? ' class="grifo"' : '')+'>'
       + '<td style="text-align:center">'+selo(c)+'</td>'
       + '<td>'+dataBR(c.VENCIMENTO)+'</td><td'+(c.OBS?' title="'+esc(c.OBS)+'"':'')+'>'+esc(c.DESCRICAO)
-      + (c.ANEXO_URL ? ' <a href="'+esc(c.ANEXO_URL)+'" target="_blank" rel="noopener" title="Abrir o boleto">📎</a>' : '')
+      + (anexosDe(c).length
+          ? ' <a href="'+esc(urlAnexo(anexosDe(c)[0]))+'" target="_blank" rel="noopener" title="Abrir o anexo">📎'
+            + (anexosDe(c).length > 1 ? '<sup>'+anexosDe(c).length+'</sup>' : '') + '</a>' : '')
       + origemCP(c) + '</td>'
       + '<td>'+esc(c.FAVORECIDO||'—')
       + (semDadosCP(c) ? '<div class="mini"><span class="tag t-pend">sem dados bancários</span></div>' : '')+'</td>'
@@ -5203,15 +5389,9 @@ function formCP(id){
     + '<div class="check full"><input type="checkbox" id="cpSemDados"'+(String(c.SEM_DADOS||'').toUpperCase()==='SIM'?' checked':'')+'>'
       + '<label for="cpSemDados">Não consta dados bancários — o cliente ainda não informou a conta para o repasse</label></div>'
     + '<div class="campo full"><label for="cpObs">Observações</label><textarea id="cpObs" rows="2">'+esc(c.OBS||'')+'</textarea></div>'
-    + '<div class="campo full"><label for="cpArq">Boleto (PDF ou imagem)</label>'
-      + '<input type="file" id="cpArq" accept=".pdf,.jpg,.jpeg,.png" onchange="lerBoleto(this)">'
-      + (c.ANEXO_URL
-          ? '<p class="mini" style="margin-top:5px">Já anexado: '
-            + '<a href="'+esc(c.ANEXO_URL)+'" target="_blank" rel="noopener">abrir arquivo</a> · '
-            + '<button class="btn sm sec" onclick="removerAnexoCP(\''+c.ID+'\')">Remover</button>'
-            + '<br>Escolher um novo arquivo substitui este.</p>'
-          : '<p class="mini" style="margin-top:5px">O arquivo é guardado na pasta do sistema no Google Drive. '
-            + 'Sendo PDF, o sistema lê a linha digitável automaticamente.</p>')
+    + '<div class="campo full"><label for="cpArq">Anexos — boleto, comprovante, nota (PDF ou imagem)</label>'
+      + '<input type="file" id="cpArq" accept=".pdf,.jpg,.jpeg,.png" multiple onchange="lerBoleto(this)">'
+      + '<div id="boxAnexos">' + listaAnexosHTML(c) + '</div>'
       + '</div>'
     + '<div class="campo full"><label>Código de barras para pagamento</label>'
       + '<div id="boxLinha"></div></div>'
@@ -5283,13 +5463,17 @@ async function gravarCP(id){
                   LINHA_DIGITAVEL: String(val('cpLinha')||'').replace(/\D/g,'') };
 
   const fav = garantirFavorecido(tit(val('cpFav')), val('cpCat'));
-  // o boleto sobe para o Drive antes de gravar a conta
-  let anexo = atual.ANEXO_URL || '';
+  // os arquivos sobem para o Drive antes de gravar a conta, e se somam aos que já existem
+  const lista = anexosDe(atual);
   const arq = document.getElementById('cpArq');
-  if (arq && arq.files && arq.files[0]){
-    try{ anexo = await enviarAnexo(arq.files[0], 'CONTAS_PAGAR', id || ''); }
-    catch(e){ return toast('Não foi possível enviar o boleto: ' + e.message,'erro'); }
+  const arquivos = arq && arq.files ? [...arq.files] : [];
+  for (const f of arquivos){
+    try{
+      const url = await enviarAnexo(f, 'CONTAS_PAGAR', id || '');
+      lista.push(f.name + '::' + url);
+    }catch(e){ return toast('Não foi possível enviar "' + f.name + '": ' + e.message,'erro'); }
   }
+  const anexo = juntarAnexos(lista);
   if (recorrente){
     const lote = REC_TMP.map((r,i) => ({aba:'CONTAS_PAGAR', registro: Object.assign({}, comum, {
       ID:uid('cp'), VENCIMENTO:r.venc, VALOR: n(r.valor) ? rd(n(r.valor)) : '',
@@ -5494,7 +5678,7 @@ function agendadoDRE(mes, grupo){
   const soma = (obj, k, v) => { if (!v) return; obj[k] = rd((obj[k] || 0) + v); };
 
   (DB.PARCELAS||[]).filter(p => noMes(p.STATUS === 'Recebida' ? p.DATA_CREDITO : p.VENCIMENTO))
-    .filter(p => p.STATUS === 'Recebida' || !emExecucao(p.LANC_ID))
+    .filter(p => p.STATUS === 'Recebida' || (!emExecucao(p.LANC_ID) && !aguardaHomolog(p.LANC_ID)))
     .forEach(p => {
       const l = lancDe(p.LANC_ID);
       const cat = p.TIPO === 'Sucumbência' ? 'Sucumbência' : (l.SUBCLASSE || '—');
@@ -5563,7 +5747,7 @@ function indicadoresPainel(mes){
       .reduce((s,c) => s + (n(c.VALOR_ESCRITORIO) || n(c.VALOR)), 0));
 
   // estoques: não dependem do mês
-  const abertas = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && !cpEmExecucao(c));
+  const abertas = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && !cpEmExecucao(c) && !cpAguardando(c));
   const repassesARealizar = rd(abertas
     .filter(c => c.CATEGORIA === 'Repasse a cliente' && liberacao(c).tipo === 'ok')
     .reduce((s,c) => s + n(c.VALOR), 0));
@@ -5715,7 +5899,7 @@ function dreResultado(mes, grupo){
   const escAberto = aberto.reduce((s,p) => { const l = lancDe(p.LANC_ID);
     return s + rd(escPrevisto(p, l) + tarifaDe(p,l)); }, 0);
   const cpAberto = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago').reduce((s,c) => s + n(c.VALOR), 0);
-  const pendConc = (DB.EXTRATO||[]).filter(m => m.STATUS !== 'Conciliado').length;
+  const pendConc = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Pendente').length;
 
   const li = (rot, v, cls, drill) => {
     const abre = drill ? ' class="abrir" onclick="detalheDRE(\'' + esc(drill).replace(/'/g,"\\'") + '\')"' : '';
@@ -5925,7 +6109,24 @@ function tabelaDetalhe(cols, linhas, total){
 /* ══════════════════ EXPORTAÇÃO ══════════════════ */
 function exportarCSV(qual){
   let cab = [], linhas = [];
-  if (qual === 'contas-a-receber'){
+  if (qual === 'aguardando-homologacao'){
+    cab = ['Pasta','Cliente','Processo','Praça','Aguardando desde','Dias','Parcela','Vencimento','Valor','Observações'];
+    lancsAguardando()
+      .sort((a,b) => String(a.HOMOLOG_DATA).localeCompare(String(b.HOMOLOG_DATA)))
+      .forEach(l => {
+        const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === l.ID && p.STATUS !== 'Recebida')
+          .sort((a,b) => n(a.NUM) - n(b.NUM));
+        const dias = Math.round(diasEntre(l.HOMOLOG_DATA, hoje()));
+        if (!parc.length){
+          linhas.push([l.PASTA, l.CLIENTE, l.N_PROCESSO, l.PRACA, dataBR(l.HOMOLOG_DATA), dias,
+                       '', '', '', l.HOMOLOG_OBS || '']);
+          return;
+        }
+        parc.forEach(p => linhas.push([l.PASTA, l.CLIENTE, l.N_PROCESSO, l.PRACA,
+          dataBR(l.HOMOLOG_DATA), dias, p.TIPO + (n(p.NUM)>0 ? ' ' + n(p.NUM) : ''),
+          dataBR(p.VENCIMENTO), nMoeda(p.VALOR), l.HOMOLOG_OBS || '']));
+      });
+  } else if (qual === 'contas-a-receber'){
     cab = ['Vencimento','Pasta','Cliente','Processo','Descrição','Valor','Cliente R$','Escritório R$'];
     pendentesReceber().sort((a,b)=>String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO))).forEach(p => {
       const l = lancDe(p.LANC_ID);
