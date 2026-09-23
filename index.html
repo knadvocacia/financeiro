@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v8.3';
+const VERSAO_APP = 'v8.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -703,7 +703,8 @@ const MODULOS = [
   {k:'pagas', t:'Contas pagas', i:'✓'},
   {k:'comissoes', t:'Comissões', i:'%'},
   {g:'Gestão'},
-  {k:'painel', t:'Painel e DRE', i:'◧'}
+  {k:'painel', t:'Painel e DRE', i:'◧'},
+  {k:'resumo', t:'Resumo', i:'∑'}
 ];
 /* o usuário só enxerga as abas liberadas para ele; TODAS libera tudo */
 function podeVer(k){
@@ -736,7 +737,7 @@ function render(){
   pintarNav();
   const f = { conciliacao:telaConciliacao, corrente:telaContaCorrente, lancamentos:telaLancamentos,
               receber:telaReceber, recebidas:telaRecebidas, pagar:telaPagar, pagas:telaPagas,
-              comissoes:telaComissoes, painel:telaPainel }[ABA];
+              comissoes:telaComissoes, painel:telaPainel, resumo:telaResumo }[ABA];
   $('#tela').innerHTML = f ? f()
     : vazio('Sem abas liberadas','Peça ao administrador para liberar o acesso do seu usuário.');
 }
@@ -1191,7 +1192,8 @@ function opcoesContas(comTodas){
 const ABAS_SISTEMA = [
   ['conciliacao','Conciliação bancária'], ['corrente','Conta corrente'], ['lancamentos','Lançamentos'],
   ['receber','Contas a receber'], ['recebidas','Contas recebidas'], ['pagar','Contas a pagar'],
-  ['pagas','Contas pagas'], ['comissoes','Comissões'], ['painel','Painel e DRE'], ['config','Configurações']
+  ['pagas','Contas pagas'], ['comissoes','Comissões'], ['painel','Painel e DRE'], ['resumo','Resumo'],
+  ['config','Configurações']
 ];
 const abasDoUsuario = u => String((u && u.ABAS) || '').toUpperCase() === 'TODAS' ? ABAS_SISTEMA.map(a => a[0])
   : String((u && u.ABAS) || '').split('|').filter(Boolean);
@@ -1581,7 +1583,14 @@ function cfgGeral(){
     + '<div class="secao-form" style="margin-top:22px">Manutenção da base</div>'
     + '<p class="mini">Procura registros que perderam a origem — parcelas sem lançamento, repasses sem parcela, '
     + 'comissões sem recebimento — e mostra um relatório antes de limpar.</p>'
-    + '<div style="margin-top:8px"><button class="btn sec" onclick="verificarOrfaos()">Verificar registros órfãos</button></div>'
+    + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+    + '<button class="btn sec" onclick="verificarOrfaos()">Verificar registros órfãos</button>'
+    + '<button class="btn sec" onclick="verificarDiaUtil()">Corrigir vencimentos em fim de semana</button></div>'
+    + '<div class="secao-form" style="margin-top:22px">Mudança de rateio</div>'
+    + '<p class="mini">Passa de uma vez todos os acordos de um percentual para outro — 70% / 30% para 67% / 33%, '
+    + 'por exemplo — recalculando as parcelas em aberto e os repasses ainda não pagos. '
+    + 'Mostra tudo o que vai mudar antes de aplicar.</p>'
+    + '<div style="margin-top:8px"><button class="btn sec" onclick="verificarRateio()">Mudar o rateio dos acordos</button></div>'
     + '<div class="secao-form" style="margin-top:22px">Senha master</div>'
     + '<div class="grade">'
     + '<div class="campo"><label for="cgMaster">Nova senha do usuário master</label>'
@@ -2257,6 +2266,10 @@ const emExecucao = lancId => String((lancDe(lancId)||{}).EXECUCAO||'').toUpperCa
 /* acordo firmado mas ainda sem homologação do juízo: sai das listas até sair a decisão */
 const aguardaHomolog = lancId => String((lancDe(lancId)||{}).HOMOLOG||'').toUpperCase() === 'SIM';
 const lancsAguardando = () => (DB.LANCAMENTOS||[]).filter(l => aguardaHomolog(l.ID) && !emExecucao(l.ID));
+/* acordo homologado, esperando o juízo liberar a guia de levantamento */
+const aguardaGuia = lancId => String((lancDe(lancId)||{}).GUIA||'').toUpperCase() === 'SIM';
+const lancsAguardandoGuia = () => (DB.LANCAMENTOS||[])
+  .filter(l => aguardaGuia(l.ID) && !emExecucao(l.ID) && !aguardaHomolog(l.ID));
 function lancDoCP(c){
   if (!c || !c.PARCELA_ID) return '';
   const p = parcDe(c.PARCELA_ID);
@@ -2264,8 +2277,114 @@ function lancDoCP(c){
 }
 const cpEmExecucao = c => emExecucao(lancDoCP(c));
 const cpAguardando = c => aguardaHomolog(lancDoCP(c));
+const cpAguardandoGuia = c => aguardaGuia(lancDoCP(c));
 const lancsEmExecucao = () => (DB.LANCAMENTOS||[]).filter(l => emExecucao(l.ID));
 const contasSemDados = () => (DB.CONTAS_PAGAR||[]).filter(c => semDadosCP(c) && !cpEmExecucao(c));
+
+/* marca a pasta como aguardando a guia de levantamento: o acordo já foi
+   homologado, mas o dinheiro só sai quando o juízo liberar a guia */
+function marcarGuia(lancId){
+  const l = lancDe(lancId);
+  if (!l.ID) return toast('Lançamento não encontrado.','erro');
+  if (aguardaGuia(lancId)) return formLiberarGuia(lancId);
+  if (emExecucao(lancId)) return toast('Esta pasta está em execução. Tire-a da execução antes.','erro');
+  if (aguardaHomolog(lancId)) return toast('Esta pasta aguarda homologação. Confirme a homologação antes.','erro');
+  const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === lancId && p.STATUS !== 'Recebida');
+  const cps = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && lancDoCP(c) === lancId);
+  const soma = arr => arr.reduce((s,x) => s + n(x.VALOR), 0);
+  modal('Aguardando liberação de guia — ' + (l.PASTA || '—'),
+    '<p>' + pastaCliente(l.PASTA, l.CLIENTE) + (l.N_PROCESSO ? '<div class="mini">'+esc(l.N_PROCESSO)+'</div>' : '') + '</p>'
+    + '<p style="margin-top:10px">O acordo está homologado, mas a guia de levantamento ainda não foi liberada. '
+    + 'Enquanto espera, saem das listas:</p>'
+    + '<div class="tw" style="margin-top:8px"><table class="densa"><tbody>'
+    + '<tr><td>Parcelas em contas a receber</td><td class="num">'+parc.length+'</td>'
+      + '<td class="num">'+nMoeda(soma(parc))+'</td></tr>'
+    + '<tr><td>Repasses em contas a pagar</td><td class="num">'+cps.length+'</td>'
+      + '<td class="num">'+nMoeda(soma(cps))+'</td></tr>'
+    + '</tbody></table></div>'
+    + '<div class="campo" style="margin-top:12px"><label for="guObs">Observações (opcional)</label>'
+    + '<textarea id="guObs" rows="2" placeholder="data do pedido, número do alvará, o que falta…"></textarea></div>'
+    + '<p class="mini">Nada é apagado: tudo fica na lista de acordos aguardando guia, na aba Contas a receber, '
+    + 'e volta assim que a guia for liberada.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn" onclick="gravarGuia(\''+lancId+'\',1)">Marcar como aguardando guia</button>', 'estreita');
+}
+function formLiberarGuia(lancId){
+  const l = lancDe(lancId);
+  const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === lancId && p.STATUS !== 'Recebida');
+  modal('Guia liberada — ' + (l.PASTA || '—'),
+    '<p>' + pastaCliente(l.PASTA, l.CLIENTE) + '</p>'
+    + '<p style="margin-top:10px">Aguardando a guia desde <b>'+dataBR(l.GUIA_DATA)+'</b>.'
+    + (l.GUIA_OBS ? '<div class="mini" style="margin-top:6px">'+esc(l.GUIA_OBS)+'</div>' : '') + '</p>'
+    + '<p class="mini" style="margin-top:10px">Confirmando, as <b>'+parc.length+'</b> parcela(s) voltam para contas a receber '
+    + 'e os repasses voltam para contas a pagar.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn ok" onclick="gravarGuia(\''+lancId+'\',0)">Guia liberada — voltar para as listas</button>', 'estreita');
+}
+function gravarGuia(lancId, entrar){
+  const l = lancDe(lancId); if (!l.ID) return;
+  const obs = entrar ? val('guObs') : '';
+  fecharModal();
+  salvarLoteRapido([{aba:'LANCAMENTOS', registro: Object.assign({}, l, {
+    GUIA: entrar ? 'SIM' : '',
+    GUIA_DATA: entrar ? hoje() : '',
+    GUIA_OBS: entrar ? obs : '' })}]);
+  toast(entrar ? 'Pasta ' + (l.PASTA||'') + ' aguardando liberação de guia — saiu de contas a receber e a pagar.'
+               : 'Guia liberada — pasta ' + (l.PASTA||'') + ' voltou para as listas.', 'ok');
+}
+
+/* ── lista dos acordos que esperam a guia ── */
+function relatorioGuia(){
+  const L = lancsAguardandoGuia().sort((a,b) => String(a.GUIA_DATA).localeCompare(String(b.GUIA_DATA)));
+  if (!L.length) return '<div class="card">'
+    + vazio('Nenhum acordo aguardando guia',
+            'Use o botão 📄 em contas a receber para marcar uma pasta cuja guia de levantamento ainda não saiu.')
+    + '</div>';
+  const soma = arr => arr.reduce((s,x) => s + n(x.VALOR), 0);
+  let totReceber = 0, totPagar = 0;
+  const blocos = L.map(l => {
+    const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === l.ID).sort((a,b) => n(a.NUM) - n(b.NUM));
+    const aReceber = parc.filter(p => p.STATUS !== 'Recebida');
+    const cps = (DB.CONTAS_PAGAR||[]).filter(c => lancDoCP(c) === l.ID && c.STATUS !== 'Pago');
+    totReceber = rd(totReceber + soma(aReceber));
+    totPagar = rd(totPagar + soma(cps));
+    const dias = Math.round(diasEntre(l.GUIA_DATA, hoje()));
+    return '<div class="card"><h3>' + esc(l.PASTA || '—') + ' · ' + esc(l.CLIENTE || '—')
+      + '<span style="float:right;font-weight:400;font-size:11.5px;color:var(--ink2)">aguardando desde '
+      + dataBR(l.GUIA_DATA) + (dias > 0 ? ' · ' + dias + ' dia(s)' : '') + '</span></h3>'
+      + '<div class="corpo">'
+      + (l.N_PROCESSO ? '<div class="mini">Processo ' + esc(l.N_PROCESSO) + (l.PRACA ? ' · ' + esc(l.PRACA) : '') + '</div>' : '')
+      + (l.GUIA_OBS ? '<div class="mini" style="color:var(--brass);margin-top:4px">' + esc(l.GUIA_OBS) + '</div>' : '')
+      + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+      + '<button class="btn sm ok" onclick="marcarGuia(\''+l.ID+'\')">Guia liberada</button>'
+      + '<button class="btn sm sec" onclick="verParcelas(\''+l.ID+'\')">Ver pasta</button>'
+      + '<button class="btn sm sec" onclick="formLanc(\''+l.ID+'\')">Editar</button>'
+      + '</div></div>'
+      + '<div class="tw"><table class="densa"><thead><tr><th>Parcelas do acordo</th><th>Vencimento</th>'
+      + '<th class="num">Valor</th><th class="num">Cliente</th><th class="num">Escritório</th></tr></thead><tbody>'
+      + (parc.length ? parc.map(p => '<tr>'
+          + '<td>'+esc(p.TIPO + (n(p.NUM)>0 ? ' ' + n(p.NUM) : ''))+'</td>'
+          + '<td>'+dataBR(p.VENCIMENTO)+'</td>'
+          + '<td class="num">'+nMoeda(p.VALOR)+'</td>'
+          + '<td class="num">'+nMoeda(rd(n(p.VALOR) - escPrevisto(p, l) - tarifaDe(p, l)))+'</td>'
+          + '<td class="num">'+nMoeda(rd(escPrevisto(p, l) + tarifaDe(p, l)))+'</td></tr>').join('')
+        : '<tr><td colspan="5" class="mini">Sem parcelas lançadas.</td></tr>')
+      + '</tbody><tfoot><tr><th colspan="2" style="text-align:right">Fora das listas enquanto espera</th>'
+      + '<th class="num">'+nMoeda(soma(aReceber))+'</th><th colspan="2"></th></tr></tfoot></table></div>'
+      + '</div>';
+  }).join('');
+
+  return '<div class="kpis">'
+    + kpi('Aguardando guia', L.length, 'acordo(s) homologado(s)', 'b')
+    + kpi('A receber suspenso', moeda(totReceber), 'parcelas fora de contas a receber', 'd')
+    + kpi('A pagar suspenso', moeda(totPagar), 'repasses fora de contas a pagar', '')
+    + kpi('Mais antigo', L.length ? Math.round(diasEntre(L[0].GUIA_DATA, hoje())) + ' dias' : '—',
+          'esperando desde ' + (L.length ? dataBR(L[0].GUIA_DATA) : '—'), 'n')
+    + '</div>'
+    + '<p class="mini" style="margin:-6px 0 14px">Nada foi apagado: as parcelas e os repasses voltam para as listas '
+    + 'assim que a guia for liberada.</p>'
+    + blocos;
+}
 
 /* marca a pasta como aguardando homologação: as parcelas saem das listas
    até o juízo homologar o acordo */
@@ -2521,7 +2640,8 @@ function relatorioSemDados(){
 
 function pendentesReceber(){
   return (DB.PARCELAS||[])
-    .filter(p => p.STATUS !== 'Recebida' && !emExecucao(p.LANC_ID) && !aguardaHomolog(p.LANC_ID));
+    .filter(p => p.STATUS !== 'Recebida' && !emExecucao(p.LANC_ID)
+              && !aguardaHomolog(p.LANC_ID) && !aguardaGuia(p.LANC_ID));
 }
 function trechosNum(txt, min){
   const out = new Set();
@@ -2694,7 +2814,7 @@ function telaConciliacao(){
     + subtabs([['pendentes','Pendentes ('+pend.length+')'],
                ['conciliados','Conciliados ('+conc.length+')'],
                ['naoid','Depósitos não identificados ('+naoId.length+')'],
-               ['execucao','Acordos em execução ('+lancsEmExecucao().length+')'],
+               ['execucao','Acordos não cumpridos enviados para execução ('+lancsEmExecucao().length+')'],
                ['semdados','Sem dados bancários ('+contasSemDados().length+')']])
     + (sub === 'pendentes' ? '' : avisoExtratoParcial());
 
@@ -4773,16 +4893,20 @@ function telaReceber(){
   let L = pendentesReceber().map(p => {
     const l = lancDe(p.LANC_ID);
     return {id:p.ID, tipo:'parcela', pasta:l.PASTA, cliente:l.CLIENTE, proc:l.N_PROCESSO, praca:l.PRACA,
+            cat: p.TIPO === 'Sucumbência' ? 'Sucumbência' : (l.SUBCLASSE || ''),
+            sub: l.SUBCATEGORIA || '',
             desc:p.TIPO + (p.NUM>0?' '+p.NUM+'/'+l.QTD_PARCELAS:''), venc:p.VENCIMENTO, valor:n(p.VALOR),
             cli:rd(n(p.VALOR) - escPrevisto(p, l) - tarifaDe(p,l)),
             esc:rd(escPrevisto(p, l) + tarifaDe(p,l)), lanc:l.ID};
   });
   (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido').forEach(c =>
     L.push({id:c.ID, tipo:'avulso', pasta:c.PASTA || '—', cliente:c.CLIENTE, proc:'', praca:c.PRACA || '', desc:c.DESCRICAO,
+            cat:c.CATEGORIA || '', sub:c.SUBCATEGORIA || '',
             venc:c.VENCIMENTO, valor:n(c.VALOR), cli:n(c.VALOR_CLIENTE),
             esc:n(c.VALOR_ESCRITORIO) || n(c.VALOR), lanc:''}));
 
-  L = L.filter(r => casa(r, ['pasta','cliente','proc','desc'], t))
+  L = L.filter(r => casa(r, ['pasta','cliente','proc','desc','cat','sub'], t))
+       .filter(r => entreDatas(r.venc, FILTROS.arDe, FILTROS.arAte))
        .filter(r => !mes || mesDe(r.venc) === mes)
        .filter(r => !sit || (sit === 'vencidas' ? r.venc < hj : r.venc >= hj))
        .sort((a,b) => String(a.venc).localeCompare(String(b.venc)));
@@ -4796,28 +4920,35 @@ function telaReceber(){
   const selecionados = L.filter(r => SELR.has(r.id));
 
   const aguardando = lancsAguardando();
+  const aguardaG = lancsAguardandoGuia();
   const abasR = subtabs([['abertas','Em aberto'],
-                         ['homolog','⏳ Aguardando homologação ('+aguardando.length+')']]);
-  if ((SUB || 'abertas') === 'homolog'){
+                         ['homolog','⏳ Aguardando homologação ('+aguardando.length+')'],
+                         ['guia','📄 Aguardando liberação de guia ('+aguardaG.length+')']]);
+  const subR = SUB || 'abertas';
+  if (subR === 'homolog'){
     return cabec('Contas a receber', 'Acordos firmados que ainda não foram homologados pelo juízo.',
         '<button class="btn sec" onclick="exportarCSV(\'aguardando-homologacao\')">Exportar CSV</button>')
       + abasR + relatorioHomologacao();
   }
+  if (subR === 'guia'){
+    return cabec('Contas a receber', 'Acordos homologados que esperam a liberação da guia de levantamento.',
+        '<button class="btn sec" onclick="exportarCSV(\'aguardando-guia\')">Exportar CSV</button>')
+      + abasR + relatorioGuia();
+  }
 
   return cabec('Contas a receber', 'Parcelas em aberto. A baixa só acontece ao conciliar o crédito no extrato bancário.',
       '<button class="btn sec" onclick="formCR()">Nova conta a receber</button>'
-    + '<button class="btn sec" onclick="irPara(\'receber\',\'homolog\')">⏳ Aguardando homologação'
+    + '<button class="btn sec" onclick="irPara(\'receber\',\'homolog\')">⏳ Homologação'
       + (aguardando.length ? ' (' + aguardando.length + ')' : '') + '</button>'
+    + '<button class="btn sec" onclick="irPara(\'receber\',\'guia\')">📄 Guia'
+      + (aguardaG.length ? ' (' + aguardaG.length + ')' : '') + '</button>'
     + '<button class="btn sec" onclick="exportarCSV(\'contas-a-receber\')">Exportar CSV</button>')
     + abasR
-    + '<div class="kpis">'
-    + kpi('Em aberto', moeda(total), L.length + ' lançamento(s)', 'd')
-    + kpi('Vencidas', moeda(vencidas.reduce((s,r)=>s+r.valor,0)), vencidas.length + ' em atraso', vencidas.length ? 'n' : '')
-    + kpi('Parte do cliente', moeda(L.reduce((s,r)=>s+r.cli,0)), 'repasse previsto, já sem a tarifa', 'b')
-    + kpi('Parte do escritório', moeda(L.reduce((s,r)=>s+r.esc,0)), 'receita prevista, com a tarifa', 'p')
-    + '</div>'
-    + '<div class="filtros">' + campoBusca('Pasta, cliente, processo ou descrição…') + selMes('fMesR', mes)
-    + sel('fSit','Situação',[['','Todas'],['vencidas','Vencidas'],['aVencer','A vencer']], sit,'','onchange="setF(\'fSit\',this.value)"') + '</div>'
+    + '<div class="filtros">' + campoBusca('Pasta, cliente, processo ou descrição…')
+    + campoData('arDe','Vencimento de') + campoData('arAte','até')
+    + selMes('fMesR', mes)
+    + sel('fSit','Situação',[['','Todas'],['vencidas','Vencidas'],['aVencer','A vencer']], sit,'','onchange="setF(\'fSit\',this.value)"')
+    + botaoLimpar(['busca','arDe','arAte','fMesR','fSit']) + '</div>'
     + (selecionados.length
         ? '<div class="barraSel"><b>'+selecionados.length+'</b> selecionado(s) · '
           + moeda(selecionados.reduce((s,r) => s + r.valor, 0))
@@ -4828,14 +4959,16 @@ function telaReceber(){
     + '<div class="card"><div class="tw"><table><thead><tr>'
     + '<th style="width:34px"><input type="checkbox" title="Selecionar todos" '+(todosMarcados?'checked':'')
       + ' style="width:16px;height:16px;accent-color:var(--brand)" onchange="selecionarTodosReceber(this.checked)"></th>'
-    + '<th>Vencimento</th><th>Pasta / cliente</th><th>Descrição</th>'
+    + '<th>Vencimento</th><th>Pasta / cliente</th><th>Descrição</th><th>Categoria</th>'
     + '<th>Processo</th><th class="num">Valor</th><th class="num">Cliente</th><th class="num">Escritório</th><th></th></tr></thead><tbody>'
     + (L.length ? L.map(r => '<tr'+(SELR.has(r.id) ? ' class="sel"' : r.venc < hj ? ' class="grifo"' : '')+'>'
       + '<td><input type="checkbox" '+(SELR.has(r.id)?'checked':'')
         + ' style="width:16px;height:16px;accent-color:var(--brand)" onchange="marcarReceber(\''+r.id+'\',this.checked)"></td>'
       + '<td>'+dataBR(r.venc)+'</td>'
       + '<td>'+pastaCliente(r.pasta, r.cliente)+'</td>'
-      + '<td>'+esc(r.desc)+'</td><td class="mini">'+esc(r.proc||'—')+'</td>'
+      + '<td>'+esc(r.desc)+'</td>'
+      + '<td>'+esc(r.cat||'—')+(r.sub ? '<div class="mini">'+esc(r.sub)+'</div>' : '')+'</td>'
+      + '<td class="mini">'+esc(r.proc||'—')+'</td>'
       + '<td class="num">'+nMoeda(r.valor)+'</td><td class="num">'+nMoeda(r.cli)+'</td><td class="num">'+nMoeda(r.esc)+'</td>'
       + '<td style="text-align:right;white-space:nowrap">'
       + (r.tipo === 'parcela' ? '<button class="btn sm sec" onclick="formLanc(\''+r.lanc+'\')">Abrir</button> '
@@ -4843,10 +4976,12 @@ function telaReceber(){
             + 'onclick="marcarExecucao(\''+r.lanc+'\')">⚖</button> '
             + '<button class="btn sm sec" title="Acordo aguardando homologação — suspender esta pasta" '
             + 'onclick="marcarHomologacao(\''+r.lanc+'\')">⏳</button> '
+            + '<button class="btn sm sec" title="Aguardando liberação de guia — suspender esta pasta" '
+            + 'onclick="marcarGuia(\''+r.lanc+'\')">📄</button> '
                               : '<button class="btn sm sec" onclick="formCR(\''+r.id+'\')">Editar</button> ')
       + '<button class="btn sm per" onclick="excluirReceber([\''+r.id+'\'])">Excluir</button>'
       + '</td></tr>').join('')
-      : '<tr><td colspan="9">'+vazio('Nada a receber','Cadastre um lançamento para gerar parcelas.')+'</td></tr>')
+      : '<tr><td colspan="10">'+vazio('Nada a receber','Cadastre um lançamento para gerar parcelas.')+'</td></tr>')
     + '</tbody></table></div></div>';
 }
 function formCR(id){
@@ -4913,17 +5048,6 @@ function telaRecebidas(){
   return cabec('Contas recebidas', 'Créditos já conciliados. A tarifa sai da parte do cliente e entra na do escritório.',
       '<button class="btn sec" onclick="exportarCSV(\'contas-recebidas\')">Exportar CSV</button>')
     + abas
-    + '<div class="kpis">'
-    + kpi('Total recebido', moeda(L.reduce((s,r)=>s+r.valor,0)), L.length + ' recebimento(s)', 'p')
-    + kpi('Repassado ao cliente', moeda(L.reduce((s,r)=>s+r.cli,0)), 'parte do cliente', 'b')
-    + kpi('Receita do escritório', moeda(L.reduce((s,r)=>s+r.esc,0)), 'inclui as tarifas', 'd')
-    + kpi('Tarifas bancárias', moeda(L.reduce((s,r)=>s+r.tar,0)), 'do cliente para o escritório', '')
-    + '</div>'
-    + (L.some(r => r.tipo === 'naoid')
-        ? '<div class="kpis"><div class="kpi n"><div class="rot">Sem origem definida</div>'
-          + '<div class="val">'+moeda(L.filter(r => r.tipo==='naoid').reduce((s,r)=>s+r.valor,0))+'</div>'
-          + '<div class="sub">'+L.filter(r => r.tipo==='naoid').length+' depósito(s) no total acima, ainda a identificar</div></div></div>'
-        : '')
     + '<div class="filtros">'
     + campoData('rcDe','Crédito de') + campoData('rcAte','até')
     + campoTexto('rcBusca','Pasta, cliente ou descrição','buscar…')
@@ -5296,7 +5420,7 @@ function telaPagar(){
   // contas pagas saem daqui e vão para a aba Contas pagas
   const base = (DB.CONTAS_PAGAR||[])
     .filter(c => c.STATUS !== 'Pago')
-    .filter(c => !cpEmExecucao(c) && !cpAguardando(c))
+    .filter(c => !cpEmExecucao(c) && !cpAguardando(c) && !cpAguardandoGuia(c))
     .filter(c => entreDatas(c.VENCIMENTO, FILTROS.apDe, FILTROS.apAte))
     .filter(c => contem([c.DESCRICAO, c.FAVORECIDO, c.SUBCATEGORIA].join(' '), FILTROS.apBusca))
     .filter(c => !FILTROS.apCat || c.CATEGORIA === FILTROS.apCat)
@@ -5319,13 +5443,6 @@ function telaPagar(){
     + '<button class="btn sec" onclick="irPara(\'conciliacao\',\'execucao\')">Acordos em execução'
       + (lancsEmExecucao().length ? ' (' + lancsEmExecucao().length + ')' : '') + '</button>'
     + '<button class="btn sec" onclick="exportarCSV(\'contas-a-pagar\')">Exportar CSV</button>')
-    + '<div class="kpis">'
-    + kpi('Em aberto', moeda(abertas.reduce((s,c)=>s+n(c.VALOR),0)), abertas.length + ' conta(s)', 'b')
-    + kpi('Vencidas', moeda(atraso.reduce((s,c)=>s+n(c.VALOR),0)), atraso.length + ' em atraso', atraso.length ? 'n' : '')
-    + kpi('Liberadas para pagamento', moeda(liberadas.reduce((s,c)=>s+n(c.VALOR),0)), liberadas.length + ' conta(s) com ✓', 'p')
-    + kpi('Aguardando recebimento', moeda(travadas.reduce((s,c)=>s+n(c.VALOR),0)), travadas.length + ' repasse(s) com ✕', travadas.length ? 'n' : '')
-    + kpi('Boletos não recebidos', semBoleto.length, 'contas recorrentes ainda sem valor', semBoleto.length ? 'b' : '')
-    + '</div>'
     + '<div class="filtros">'
     + campoData('apDe','Vencimento de') + campoData('apAte','até')
     + campoTexto('apBusca','Descrição ou favorecido','buscar…')
@@ -5684,7 +5801,8 @@ function agendadoDRE(mes, grupo){
   const soma = (obj, k, v) => { if (!v) return; obj[k] = rd((obj[k] || 0) + v); };
 
   (DB.PARCELAS||[]).filter(p => noMes(p.STATUS === 'Recebida' ? p.DATA_CREDITO : p.VENCIMENTO))
-    .filter(p => p.STATUS === 'Recebida' || (!emExecucao(p.LANC_ID) && !aguardaHomolog(p.LANC_ID)))
+    .filter(p => p.STATUS === 'Recebida'
+              || (!emExecucao(p.LANC_ID) && !aguardaHomolog(p.LANC_ID) && !aguardaGuia(p.LANC_ID)))
     .forEach(p => {
       const l = lancDe(p.LANC_ID);
       const cat = p.TIPO === 'Sucumbência' ? 'Sucumbência' : (l.SUBCLASSE || '—');
@@ -5753,7 +5871,8 @@ function indicadoresPainel(mes){
       .reduce((s,c) => s + (n(c.VALOR_ESCRITORIO) || n(c.VALOR)), 0));
 
   // estoques: não dependem do mês
-  const abertas = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago' && !cpEmExecucao(c) && !cpAguardando(c));
+  const abertas = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago'
+    && !cpEmExecucao(c) && !cpAguardando(c) && !cpAguardandoGuia(c));
   const repassesARealizar = rd(abertas
     .filter(c => c.CATEGORIA === 'Repasse a cliente' && liberacao(c).tipo === 'ok')
     .reduce((s,c) => s + n(c.VALOR), 0));
@@ -6115,7 +6234,23 @@ function tabelaDetalhe(cols, linhas, total){
 /* ══════════════════ EXPORTAÇÃO ══════════════════ */
 function exportarCSV(qual){
   let cab = [], linhas = [];
-  if (qual === 'aguardando-homologacao'){
+  if (qual === 'aguardando-guia'){
+    cab = ['Pasta','Cliente','Processo','Praça','Aguardando desde','Dias','Parcela','Vencimento','Valor','Observações'];
+    lancsAguardandoGuia()
+      .sort((a,b) => String(a.GUIA_DATA).localeCompare(String(b.GUIA_DATA)))
+      .forEach(l => {
+        const parc = (DB.PARCELAS||[]).filter(p => p.LANC_ID === l.ID && p.STATUS !== 'Recebida')
+          .sort((a,b) => n(a.NUM) - n(b.NUM));
+        const dias = Math.round(diasEntre(l.GUIA_DATA, hoje()));
+        if (!parc.length){
+          linhas.push([l.PASTA, l.CLIENTE, l.N_PROCESSO, l.PRACA, dataBR(l.GUIA_DATA), dias, '', '', '', l.GUIA_OBS || '']);
+          return;
+        }
+        parc.forEach(p => linhas.push([l.PASTA, l.CLIENTE, l.N_PROCESSO, l.PRACA,
+          dataBR(l.GUIA_DATA), dias, p.TIPO + (n(p.NUM)>0 ? ' ' + n(p.NUM) : ''),
+          dataBR(p.VENCIMENTO), nMoeda(p.VALOR), l.GUIA_OBS || '']));
+      });
+  } else if (qual === 'aguardando-homologacao'){
     cab = ['Pasta','Cliente','Processo','Praça','Aguardando desde','Dias','Parcela','Vencimento','Valor','Observações'];
     lancsAguardando()
       .sort((a,b) => String(a.HOMOLOG_DATA).localeCompare(String(b.HOMOLOG_DATA)))
@@ -6133,13 +6268,20 @@ function exportarCSV(qual){
           dataBR(p.VENCIMENTO), nMoeda(p.VALOR), l.HOMOLOG_OBS || '']));
       });
   } else if (qual === 'contas-a-receber'){
-    cab = ['Vencimento','Pasta','Cliente','Processo','Descrição','Valor','Cliente R$','Escritório R$'];
+    cab = ['Vencimento','Pasta','Cliente','Descrição','Categoria','Subcategoria','Processo',
+           'Valor','Cliente R$','Escritório R$'];
     pendentesReceber().sort((a,b)=>String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO))).forEach(p => {
       const l = lancDe(p.LANC_ID);
       const tf = tarifaDe(p, l), ep = escPrevisto(p, l);
-      linhas.push([dataBR(p.VENCIMENTO), l.PASTA, l.CLIENTE, l.N_PROCESSO, p.TIPO+(p.NUM>0?' '+p.NUM:''),
+      linhas.push([dataBR(p.VENCIMENTO), l.PASTA, l.CLIENTE, p.TIPO+(p.NUM>0?' '+p.NUM:''),
+        p.TIPO === 'Sucumbência' ? 'Sucumbência' : (l.SUBCLASSE || ''), l.SUBCATEGORIA || '', l.N_PROCESSO,
         nMoeda(p.VALOR), nMoeda(rd(n(p.VALOR) - ep - tf)), nMoeda(rd(ep + tf))]);
     });
+    (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido')
+      .sort((a,b)=>String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO)))
+      .forEach(c => linhas.push([dataBR(c.VENCIMENTO), c.PASTA || '', c.CLIENTE || '', c.DESCRICAO || '',
+        c.CATEGORIA || '', c.SUBCATEGORIA || '', '', nMoeda(c.VALOR),
+        nMoeda(c.VALOR_CLIENTE), nMoeda(n(c.VALOR_ESCRITORIO) || n(c.VALOR))]));
   } else if (qual === 'contas-recebidas'){
     cab = ['Crédito','Pasta','Cliente','Descrição','Valor','Cliente','Tarifa','Escritório','Situação'];
     const linhasRec = [];
@@ -6169,6 +6311,10 @@ function exportarCSV(qual){
       .sort((a,b) => String(b.DATA_PGTO).localeCompare(String(a.DATA_PGTO)))
       .forEach(c => linhas.push([dataBR(c.DATA_PGTO), dataBR(c.VENCIMENTO), c.DESCRICAO,
         c.FAVORECIDO, c.CATEGORIA, nMoeda(c.VALOR), c.ORIGEM]));
+  } else if (qual === 'resumo'){
+    cab = ['Bloco','Indicador','Valor','Detalhe'];
+    resumoBlocos().forEach(b => b.itens.forEach(i =>
+      linhas.push([b.titulo, i.t, String(i.v).replace(/^R\$\s*/, ''), i.s])));
   } else if (qual === 'conta-corrente'){
     cab = ['Data','Histórico','Baixou','Conta','Entrada','Saída','Saldo acumulado'];
     const L = linhasCorrente();
@@ -6318,12 +6464,6 @@ function telaPagas(){
 
   return cabec('Contas pagas', 'Contas baixadas pela conciliação do extrato. Saem automaticamente de contas a pagar.',
       '<button class="btn sec" onclick="exportarCSV(\'contas-pagas\')">Exportar CSV</button>')
-    + '<div class="kpis">'
-    + kpi('Total pago', moeda(total), L.length + ' conta(s)', 'p')
-    + kpi('Repasses a clientes', moeda(repasses), 'recursos de terceiros', 'b')
-    + kpi('Comissões', moeda(comissoes), 'pagas aos comissionados', 'd')
-    + kpi('Despesas do escritório', moeda(rd(total - repasses - comissoes)), 'demais categorias', 'n')
-    + '</div>'
     + '<div class="filtros">'
     + campoData('pgDe','Pagamento de') + campoData('pgAte','até')
     + campoData('pgVde','Vencimento de') + campoData('pgVate','até')
@@ -6391,6 +6531,89 @@ function planoOrfaos(){
   return {parcOrfas, cpApagar, cpSoltar, comApagar, comSoltar, movLiberar, crSoltar, apagar, atualizar};
 }
 
+/* ══════════════════ VENCIMENTOS EM DIA ÚTIL ══════════════════
+   Corrige o que já estava gravado antes da regra existir. Só mexe no que
+   ainda não foi pago ou recebido: data de fato ocorrido não se altera. */
+function planoDiaUtil(){
+  const itens = [];
+  (DB.PARCELAS||[]).filter(p => p.STATUS !== 'Recebida').forEach(p => {
+    const nova = proximoDiaUtil(p.VENCIMENTO);
+    if (nova && nova !== p.VENCIMENTO){
+      const l = lancDe(p.LANC_ID);
+      itens.push({aba:'PARCELAS', reg:p, de:p.VENCIMENTO, para:nova,
+        quem: (l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—'),
+        oque: p.TIPO + (n(p.NUM) > 0 ? ' ' + n(p.NUM) : ''), valor: n(p.VALOR)});
+    }
+  });
+  (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago').forEach(c => {
+    const nova = proximoDiaUtil(c.VENCIMENTO);
+    if (nova && nova !== c.VENCIMENTO)
+      itens.push({aba:'CONTAS_PAGAR', reg:c, de:c.VENCIMENTO, para:nova,
+        quem: c.FAVORECIDO || '—', oque: c.DESCRICAO || '—', valor: n(c.VALOR)});
+  });
+  (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido').forEach(c => {
+    const nova = proximoDiaUtil(c.VENCIMENTO);
+    if (nova && nova !== c.VENCIMENTO)
+      itens.push({aba:'CONTAS_RECEBER', reg:c, de:c.VENCIMENTO, para:nova,
+        quem: c.CLIENTE || '—', oque: c.DESCRICAO || '—', valor: n(c.VALOR)});
+  });
+  return itens.sort((a,b) => String(a.de).localeCompare(String(b.de)));
+}
+
+function verificarDiaUtil(){
+  if (String(cfg('DIA_UTIL','SIM')).toUpperCase() === 'NAO')
+    return toast('O adiamento para dia útil está desligado em Configurações → Geral.','erro');
+  const itens = planoDiaUtil();
+  const nome = {PARCELAS:'Parcela de acordo', CONTAS_PAGAR:'Conta a pagar', CONTAS_RECEBER:'Conta a receber'};
+  const corpo = itens.length
+    ? '<div class="kpis" style="margin-bottom:12px">'
+      + kpi('Vencimentos a corrigir', itens.length, 'em sábado, domingo ou feriado', 'n')
+      + kpi('Parcelas de acordo', itens.filter(i => i.aba === 'PARCELAS').length, 'em contas a receber', 'd')
+      + kpi('Contas a pagar', itens.filter(i => i.aba === 'CONTAS_PAGAR').length, 'em aberto', 'b')
+      + '</div>'
+      + '<div class="tw" style="max-height:380px;overflow:auto"><table class="densa"><thead><tr>'
+      + '<th>Tipo</th><th>Pasta / favorecido</th><th>Descrição</th><th class="num">Valor</th>'
+      + '<th>Vencimento atual</th><th>Motivo</th><th>Passa para</th></tr></thead><tbody>'
+      + itens.map(i => '<tr><td class="mini">'+esc(nome[i.aba]||i.aba)+'</td>'
+        + '<td>'+esc(i.quem)+'</td><td>'+esc(i.oque)+'</td>'
+        + '<td class="num">'+nMoeda(i.valor)+'</td>'
+        + '<td>'+dataBR(i.de)+'</td>'
+        + '<td><span class="tag t-pend">'+esc(motivoAdiamento(i.de, i.para))+'</span></td>'
+        + '<td><b>'+dataBR(i.para)+'</b></td></tr>').join('')
+      + '</tbody></table></div>'
+      + '<p class="mini" style="margin-top:10px">Só entram lançamentos ainda em aberto. Parcelas já recebidas e '
+      + 'contas já pagas não são tocadas — a data delas é a do fato, não uma previsão.</p>'
+    : vazio('Nenhum vencimento para corrigir',
+            'Todos os lançamentos em aberto já vencem em dia útil.');
+  modal('Vencimentos em fim de semana ou feriado', corpo,
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + (itens.length ? '<button class="btn" onclick="aplicarDiaUtil()">Passar os '
+        + itens.length + ' para o próximo dia útil</button>' : ''), 'larga');
+}
+
+async function aplicarDiaUtil(){
+  const itens = planoDiaUtil();
+  if (!itens.length) return toast('Nada a corrigir.','ok');
+  if (!confirm('Alterar ' + itens.length + ' vencimento(s) para o próximo dia útil?\n\n'
+    + 'Só lançamentos em aberto são afetados.')) return;
+  fecharModal();
+  carregandoOn('Ajustando ' + itens.length + ' vencimento(s)…');
+  try{
+    const lote = itens.map(i => ({aba:i.aba, registro: Object.assign({}, i.reg, {VENCIMENTO: i.para})}));
+    lote.forEach(it => {
+      const L = DB[it.aba] || (DB[it.aba] = []);
+      const j = L.findIndex(x => x.ID === it.registro.ID);
+      if (j >= 0) L[j] = it.registro;
+    });
+    invalidarIdx(); render();
+    for (let i = 0; i < lote.length; i += 300){
+      carregandoOn('Salvando… ' + Math.min(i+300, lote.length) + ' de ' + lote.length);
+      await salvarLote(lote.slice(i, i+300));
+    }
+    toast(itens.length + ' vencimento(s) passaram para o próximo dia útil.','ok');
+  }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
+}
+
 function verificarOrfaos(){
   const p = planoOrfaos();
   const soma = arr => arr.reduce((s,x) => s + n(x.VALOR), 0);
@@ -6443,6 +6666,278 @@ async function executarLimpezaOrfaos(){
   }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
 }
 
+/* ══════════════════ RESUMO ══════════════════
+   Reúne os totais que antes ficavam no topo de cada tela, com filtros
+   próprios. Os períodos são independentes: o que está em aberto se lê pelo
+   vencimento, o que já entrou ou saiu se lê pela data do movimento. */
+function resumoBlocos(){
+  const f = FILTROS;
+  const hj = hoje();
+  const noPeriodo = (data, de, ate) => entreDatas(data, de, ate);
+
+  /* ── a receber ── */
+  const ar = pendentesReceber().map(p => {
+    const l = lancDe(p.LANC_ID);
+    return {venc:p.VENCIMENTO, valor:n(p.VALOR),
+            cli:rd(n(p.VALOR) - escPrevisto(p, l) - tarifaDe(p,l)),
+            esc:rd(escPrevisto(p, l) + tarifaDe(p,l)), praca:l.PRACA||''};
+  }).concat((DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido').map(c =>
+    ({venc:c.VENCIMENTO, valor:n(c.VALOR), cli:n(c.VALOR_CLIENTE),
+      esc:n(c.VALOR_ESCRITORIO) || n(c.VALOR), praca:c.PRACA||''})))
+    .filter(r => noPeriodo(r.venc, f.rsAbDe, f.rsAbAte))
+    .filter(r => !f.rsPraca || r.praca === f.rsPraca);
+  const arVenc = ar.filter(r => String(r.venc) < hj);
+
+  /* ── recebidas ── */
+  const rec = (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida').map(p => {
+    const l = lancDe(p.LANC_ID);
+    return {data:p.DATA_CREDITO, valor:n(p.VALOR_CREDITADO||p.VALOR), cli:n(p.VALOR_CLIENTE),
+            esc:n(p.VALOR_ESCRITORIO), tar:n(p.TARIFA), praca:l.PRACA||'', tipo:'parcela'};
+  }).concat((DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido').map(c =>
+    ({data:c.DATA_RECEB, valor:n(c.VALOR), cli:n(c.VALOR_CLIENTE),
+      esc:n(c.VALOR_ESCRITORIO) || n(c.VALOR), tar:n(c.TARIFA), praca:c.PRACA||'', tipo:'avulso'})))
+    .concat((DB.EXTRATO||[]).filter(m => m.STATUS === 'Nao identificado' && !ehDebito(m)).map(m =>
+      ({data:m.DATA, valor:Math.abs(n(m.VALOR)), cli:0, esc:0, tar:0, praca:'', tipo:'naoid'})))
+    .filter(r => noPeriodo(r.data, f.rsMovDe, f.rsMovAte))
+    .filter(r => !f.rsPraca || r.praca === f.rsPraca || r.tipo === 'naoid');
+  const naoId = rec.filter(r => r.tipo === 'naoid');
+
+  /* ── a pagar ── */
+  const ap = (DB.CONTAS_PAGAR||[])
+    .filter(c => c.STATUS !== 'Pago' && !cpEmExecucao(c) && !cpAguardando(c) && !cpAguardandoGuia(c))
+    .filter(c => noPeriodo(c.VENCIMENTO, f.rsAbDe, f.rsAbAte));
+  const apVenc = ap.filter(c => String(c.VENCIMENTO) < hj && n(c.VALOR) > 0);
+  const apLib = ap.filter(c => liberacao(c).tipo === 'ok');
+  const apTrav = ap.filter(c => liberacao(c).tipo === 'nao');
+  const apSemBoleto = ap.filter(semValorCP);
+
+  /* ── pagas ── */
+  const pg = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS === 'Pago')
+    .filter(c => noPeriodo(c.DATA_PGTO, f.rsMovDe, f.rsMovAte));
+  const pgRepasse = pg.filter(c => c.CATEGORIA === 'Repasse a cliente');
+  const pgComissao = pg.filter(c => String(c.ORIGEM||'').toLowerCase().includes('comiss'));
+
+  const soma = (arr, campo) => rd(arr.reduce((s,x) => s + n(campo ? x[campo] : x.VALOR), 0));
+  const exec = lancsEmExecucao().length, homo = lancsAguardando().length,
+        guia = lancsAguardandoGuia().length,
+        conc = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Pendente').length;
+
+  const blocos = [
+    {titulo:'Contas a receber', nota:ar.length + ' lançamento(s) em aberto', itens:[
+      {t:'Em aberto', v:moeda(soma(ar,'valor')), s:ar.length + ' lançamento(s)', c:'d'},
+      {t:'Vencidas', v:moeda(soma(arVenc,'valor')), s:arVenc.length + ' em atraso', c:arVenc.length ? 'n' : ''},
+      {t:'Parte do cliente', v:moeda(soma(ar,'cli')), s:'repasse previsto, já sem a tarifa', c:'b'},
+      {t:'Parte do escritório', v:moeda(soma(ar,'esc')), s:'receita prevista, com a tarifa', c:'p'}
+    ]},
+    {titulo:'Contas recebidas', nota:rec.length + ' crédito(s) no período', itens:[
+      {t:'Total recebido', v:moeda(soma(rec,'valor')), s:rec.length + ' recebimento(s)', c:'p'},
+      {t:'Repassado ao cliente', v:moeda(soma(rec,'cli')), s:'parte do cliente', c:'b'},
+      {t:'Receita do escritório', v:moeda(soma(rec,'esc')), s:'inclui as tarifas', c:'d'},
+      {t:'Tarifas bancárias', v:moeda(soma(rec,'tar')), s:'do cliente para o escritório', c:''}
+    ].concat(naoId.length ? [{t:'Sem origem definida', v:moeda(soma(naoId,'valor')),
+        s:naoId.length + ' depósito(s) no total acima, a identificar', c:'n'}] : [])},
+    {titulo:'Contas a pagar', nota:ap.length + ' conta(s) em aberto', itens:[
+      {t:'Em aberto', v:moeda(soma(ap)), s:ap.length + ' conta(s)', c:'b'},
+      {t:'Vencidas', v:moeda(soma(apVenc)), s:apVenc.length + ' em atraso', c:apVenc.length ? 'n' : ''},
+      {t:'Liberadas para pagamento', v:moeda(soma(apLib)), s:apLib.length + ' conta(s) com ✓', c:'p'},
+      {t:'Aguardando recebimento', v:moeda(soma(apTrav)), s:apTrav.length + ' repasse(s) com ✕', c:apTrav.length ? 'n' : ''},
+      {t:'Boletos não recebidos', v:apSemBoleto.length, s:'contas recorrentes ainda sem valor', c:apSemBoleto.length ? 'b' : ''}
+    ]},
+    {titulo:'Contas pagas', nota:pg.length + ' conta(s) no período', itens:[
+      {t:'Total pago', v:moeda(soma(pg)), s:pg.length + ' conta(s)', c:'p'},
+      {t:'Repasses a clientes', v:moeda(soma(pgRepasse)), s:'recursos de terceiros', c:'b'},
+      {t:'Comissões', v:moeda(soma(pgComissao)), s:'pagas aos comissionados', c:'d'},
+      {t:'Despesas do escritório', v:moeda(rd(soma(pg) - soma(pgRepasse) - soma(pgComissao))),
+       s:'demais categorias', c:'n'}
+    ]},
+    {titulo:'Pastas suspensas', nota:'fora das listas acima', itens:[
+      {t:'Em execução', v:exec, s:'acordos não cumpridos', c:exec ? 'n' : ''},
+      {t:'Aguardando homologação', v:homo, s:'acordos firmados', c:'b'},
+      {t:'Aguardando guia', v:guia, s:'acordos homologados', c:'b'},
+      {t:'A conciliar', v:conc, s:'movimentos do banco pendentes', c:'d'}
+    ]}
+  ];
+  return blocos;
+}
+
+function telaResumo(){
+  const f = FILTROS;
+  const blocos = resumoBlocos();
+  const pracas = (DB.PRACAS||[]).filter(p => p.ATIVO !== 'NAO').map(p => [p.NOME, p.NOME]);
+
+  const corpo = blocos.map(b =>
+    '<h3 style="font-size:13px;margin:18px 0 8px;color:var(--ink2);font-weight:600">' + b.titulo
+    + (b.nota ? ' <span class="mini" style="font-weight:400">· '+b.nota+'</span>' : '') + '</h3>'
+    + '<div class="kpis">' + b.itens.map(i => kpi(i.t, i.v, i.s, i.c)).join('') + '</div>').join('');
+
+  return cabec('Resumo', 'Os totais das contas num lugar só, com período próprio para o que está em aberto e para o que já se movimentou.',
+      '<button class="btn sec" onclick="exportarCSV(\'resumo\')">Exportar CSV</button>')
+    + '<div class="filtros">'
+    + campoData('rsAbDe','Vencimento de') + campoData('rsAbAte','até')
+    + campoData('rsMovDe','Movimento de') + campoData('rsMovAte','até')
+    + (pracas.length
+        ? sel('rsPraca','Praça', [['','Todas']].concat(pracas), f.rsPraca||'', '', 'onchange="setF(\'rsPraca\',this.value)"')
+        : '')
+    + botaoLimpar(['rsAbDe','rsAbAte','rsMovDe','rsMovAte','rsPraca'])
+    + '</div>'
+    + '<div class="card" style="border-left:3px solid var(--brand)"><div class="corpo"><p class="mini">'
+    + '<b>Vencimento</b> filtra o que ainda está em aberto — contas a receber e a pagar. '
+    + '<b>Movimento</b> filtra o que já entrou ou saiu da conta — recebidas e pagas. '
+    + 'Deixando em branco, cada bloco mostra tudo.'
+    + '</p></div></div>'
+    + corpo
+    + '<p class="mini" style="margin-top:14px">Pastas em execução, aguardando homologação ou aguardando guia não entram '
+    + 'nos totais de contas a receber e a pagar — elas estão suspensas.</p>';
+}
+
+/* ══ Mudança de rateio em massa: 70/30 → 67/33, por exemplo ═══════════════
+   Só mexe no que ainda está em aberto. Parcela já recebida e repasse já pago
+   não são tocados — ali o dinheiro já andou e o valor é fato, não previsão. */
+function planoRateio(cliDe, cliPara){
+  const escDe = rd(100 - n(cliDe)), escPara = rd(100 - n(cliPara));
+  const igual = (a,b) => Math.abs(n(a) - n(b)) < 0.005;
+  const lancs = [], itens = [], pulados = [];
+
+  (DB.LANCAMENTOS||[]).forEach(l => {
+    if (!igual(l.PCT_CLIENTE, cliDe) || !igual(l.PCT_ESCRITORIO, escDe)) return;
+    const novoL = Object.assign({}, l, {PCT_CLIENTE: n(cliPara), PCT_ESCRITORIO: escPara});
+    lancs.push(novoL);
+    const quem = (l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—');
+
+    (DB.PARCELAS||[]).filter(p => p.LANC_ID === l.ID).forEach(p => {
+      const oque = p.TIPO + (n(p.NUM) > 0 ? ' ' + n(p.NUM) : '');
+      const v = rd(n(p.VALOR));
+      if (p.STATUS === 'Recebida')
+        return pulados.push({quem, oque, valor:rd(n(p.VALOR_CREDITADO) || v), motivo:'parcela já recebida'});
+
+      const cp = (DB.CONTAS_PAGAR||[]).find(c => c.ID === p.CP_ID)
+              || (DB.CONTAS_PAGAR||[]).find(c => c.PARCELA_ID === p.ID && c.CATEGORIA === 'Repasse a cliente');
+      if (cp && cp.STATUS === 'Pago')
+        return pulados.push({quem, oque, valor:v, motivo:'repasse ao cliente já pago'});
+
+      const cpc = String(p.ESC_PREV == null ? '' : p.ESC_PREV).trim() !== '';
+      const tar = tarifaDe(p, l);
+      const escAnt = escPrevisto(p, l);
+      let escNov, regParc = null;
+      if (cpc){
+        // no acordo CPC o valor do escritório é digitado: só recalcula o que bate com o rateio antigo
+        if (!igual(p.ESC_PREV, rd(v * escDe / 100)))
+          return pulados.push({quem, oque, valor:v, motivo:'acordo CPC com valor digitado fora do rateio'});
+        escNov = rd(v * escPara / 100);
+        regParc = Object.assign({}, p, {ESC_PREV: escNov});
+      } else {
+        escNov = escPrevisto(p, novoL);
+      }
+      if (igual(escAnt, escNov)) return;
+
+      const cliAnt = rd(v - escAnt - tar), cliNov = rd(v - escNov - tar);
+      if (cliNov < 0)
+        return pulados.push({quem, oque, valor:v, motivo:'a parte do cliente ficaria negativa'});
+
+      const regs = [];
+      if (regParc) regs.push({aba:'PARCELAS', registro: regParc});
+      if (cp) regs.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {
+        VALOR: cliNov,
+        OBS: 'Valor previsto sobre a parcela de ' + moeda(v) + ' · '
+           + memoriaValores(v, escNov, tar, cpc ? 0 : sucDaParcela(p))
+           + ' · aguardando o crédito da parcela'
+      })});
+      itens.push({quem, oque, venc:p.VENCIMENTO, valor:v, cpc, temCP:!!cp,
+                  cliAnt, cliNov, escAnt:rd(escAnt + tar), escNov:rd(escNov + tar), regs});
+    });
+  });
+  return {lancs, itens, pulados, cliDe:n(cliDe), cliPara:n(cliPara), escDe, escPara};
+}
+
+function verificarRateio(cliDe, cliPara){
+  const de = cliDe == null ? 70 : n(cliDe), para = cliPara == null ? 67 : n(cliPara);
+  const p = planoRateio(de, para);
+  const somaAnt = rd(p.itens.reduce((s,i) => s + i.cliAnt, 0));
+  const somaNov = rd(p.itens.reduce((s,i) => s + i.cliNov, 0));
+  const comCP = p.itens.filter(i => i.temCP).length;
+
+  const campos = '<div class="grade" style="margin-bottom:12px">'
+    + inp('rtDe','Rateio atual — % do cliente', de, '', 'number', 'step="0.01"')
+    + inp('rtPara','Novo % do cliente', para, '', 'number', 'step="0.01"')
+    + '<div class="campo"><label>&nbsp;</label>'
+      + '<button class="btn sec" onclick="verificarRateio(val(\'rtDe\'), val(\'rtPara\'))">Conferir</button></div>'
+    + '</div>'
+    + '<p class="mini">Procura os acordos em <b>' + pct(de) + ' cliente / ' + pct(rd(100-de))
+    + ' escritório</b> e passa para <b>' + pct(para) + ' / ' + pct(p.escPara) + '</b>.</p>';
+
+  const corpo = campos + (!p.lancs.length
+    ? vazio('Nenhum acordo nesse rateio', 'Não há lançamento em ' + pct(de) + ' / ' + pct(rd(100-de)) + '.')
+    : '<div class="kpis" style="margin:12px 0">'
+      + kpi('Acordos', p.lancs.length, 'passam para ' + pct(para) + ' / ' + pct(p.escPara), 'd')
+      + kpi('Parcelas em aberto', p.itens.length, 'valores recalculados', 'b')
+      + kpi('Repasses a pagar', comCP, moeda(somaAnt) + ' → ' + moeda(somaNov), 'p')
+      + kpi('Vai para o escritório', moeda(rd(somaAnt - somaNov)), 'a mais, no total em aberto', 'n')
+      + '</div>'
+      + (p.itens.length
+        ? '<div class="tw" style="max-height:320px;overflow:auto"><table class="densa"><thead><tr>'
+          + '<th>Pasta / cliente</th><th>Parcela</th><th>Vencimento</th><th class="num">Valor</th>'
+          + '<th class="num">Cliente hoje</th><th class="num">Cliente novo</th>'
+          + '<th class="num">Escritório hoje</th><th class="num">Escritório novo</th></tr></thead><tbody>'
+          + p.itens.map(i => '<tr><td>'+esc(i.quem)+'</td><td class="mini">'+esc(i.oque)+'</td>'
+            + '<td>'+dataBR(i.venc)+'</td><td class="num">'+nMoeda(i.valor)+'</td>'
+            + '<td class="num">'+nMoeda(i.cliAnt)+'</td><td class="num"><b>'+nMoeda(i.cliNov)+'</b></td>'
+            + '<td class="num">'+nMoeda(i.escAnt)+'</td><td class="num"><b>'+nMoeda(i.escNov)+'</b></td></tr>').join('')
+          + '</tbody></table></div>'
+        : '<p class="mini">Os acordos mudam de percentual, mas nenhuma parcela em aberto tem valor a recalcular.</p>')
+      + (p.pulados.length
+        ? '<div class="secao-form" style="margin-top:18px">Fora da mudança — ' + p.pulados.length + '</div>'
+          + '<div class="tw" style="max-height:200px;overflow:auto"><table class="densa"><thead><tr>'
+          + '<th>Pasta / cliente</th><th>Parcela</th><th class="num">Valor</th><th>Motivo</th></tr></thead><tbody>'
+          + p.pulados.map(i => '<tr><td>'+esc(i.quem)+'</td><td class="mini">'+esc(i.oque)+'</td>'
+            + '<td class="num">'+nMoeda(i.valor)+'</td>'
+            + '<td><span class="tag t-pend">'+esc(i.motivo)+'</span></td></tr>').join('')
+          + '</tbody></table></div>'
+        : '')
+      + '<div class="check" style="margin-top:14px"><input type="checkbox" id="rtPadrao" checked>'
+        + '<label for="rtPadrao">Passar também o percentual padrão dos novos acordos para '
+        + pct(para) + ' / ' + pct(p.escPara) + '</label></div>'
+      + '<p class="mini" style="margin-top:10px">Parcelas já recebidas e repasses já pagos não são tocados — '
+      + 'naquilo o dinheiro já andou e o valor é fato, não previsão. Recebimentos avulsos, lançados fora de um '
+      + 'acordo, também ficam como estão.</p>');
+
+  modal('Mudar o rateio dos acordos', corpo,
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + (p.lancs.length ? '<button class="btn" onclick="aplicarRateio('+de+','+para+')">Aplicar em '
+        + p.lancs.length + ' acordo(s)</button>' : ''), 'larga');
+}
+
+async function aplicarRateio(cliDe, cliPara){
+  const padrao = !!val('rtPadrao');
+  const p = planoRateio(cliDe, cliPara);
+  if (!p.lancs.length) return toast('Nenhum acordo nesse rateio.','ok');
+  if (!confirm('Passar ' + p.lancs.length + ' acordo(s) de ' + pct(p.cliDe) + ' / ' + pct(rd(100-p.cliDe))
+    + ' para ' + pct(p.cliPara) + ' / ' + pct(p.escPara) + '?\n\n'
+    + p.itens.length + ' parcela(s) em aberto terão o valor recalculado.\n'
+    + 'Parcelas já recebidas e repasses já pagos não são alterados.')) return;
+  fecharModal();
+
+  const lote = p.lancs.map(l => ({aba:'LANCAMENTOS', registro:l}));
+  p.itens.forEach(i => i.regs.forEach(r => lote.push(r)));
+  if (padrao){
+    const c = (DB.CONFIG||[]).find(x => x.CHAVE === 'PCT_CLIENTE_PADRAO') || {ID:'', CHAVE:'PCT_CLIENTE_PADRAO'};
+    lote.push({aba:'CONFIG', registro: Object.assign({}, c, {VALOR: String(p.cliPara)})});
+  }
+
+  carregandoOn('Alterando o rateio de ' + p.lancs.length + ' acordo(s)…');
+  try{
+    lote.forEach(it => {
+      const L = DB[it.aba] || (DB[it.aba] = []);
+      const j = L.findIndex(x => x.ID && x.ID === it.registro.ID);
+      if (j >= 0) L[j] = it.registro; else if (it.registro.ID) L.push(it.registro);
+    });
+    invalidarIdx(); render();
+    for (let i = 0; i < lote.length; i += 300){
+      carregandoOn('Salvando… ' + Math.min(i+300, lote.length) + ' de ' + lote.length);
+      await salvarLote(lote.slice(i, i+300));
+    }
+    toast(p.lancs.length + ' acordo(s) agora em ' + pct(p.cliPara) + ' / ' + pct(p.escPara) + '.','ok');
+  }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
+}
 </script>
 </body>
 </html>
