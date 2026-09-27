@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v8.9';
+const VERSAO_APP = 'v9.0';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -1384,15 +1384,36 @@ const catAcordo = nome => (DB.SUBCLASSES||[]).some(c => c.NOME === nome && Strin
 const catCPC = nome => (DB.SUBCLASSES||[]).some(c => c.NOME === nome && String(c.CPC||'').toUpperCase() === 'SIM');
 const PARCELAS_CPC = 7;
 const GRUPO_PADRAO = 'Escritório';
+const GRUPO_PARTICULAR = 'Particular';
+
+/* ── DRE particular ───────────────────────────────────────────────────────
+   Movimento que não é do escritório — receita e despesa pessoais da Dra. Karla,
+   aplicação financeira, obra — sai do DRE do escritório e forma um DRE só dele.
+   A lista é editável em Configurações → Geral. A comparação ignora acento,
+   maiúscula e ponto, então "Receita Dra Karla" acha "Receita Dra. Karla". */
+const CATS_PARTICULAR_PADRAO = 'Receita Dra. Karla, Resgate Aplicação, Aplicação, Despesa Dra. Karla, Obra';
+const chaveCat = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+                        .replace(/\./g,'').replace(/\s+/g,' ').trim().toLowerCase();
+const catsParticular = () => String(cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO))
+  .split(/[,;|]/).map(chaveCat).filter(Boolean);
+const ehCatParticular = nome => catsParticular().indexOf(chaveCat(nome)) > -1;
+
 const grupoDaCat = nome => {
   const c = (DB.SUBCLASSES||[]).find(x => x.NOME === nome);
-  return (c && String(c.GRUPO||'').trim()) || GRUPO_PADRAO;
+  const g = c && String(c.GRUPO||'').trim();
+  if (g) return g;                                   // grupo do cadastro manda
+  if (ehCatParticular(nome)) return GRUPO_PARTICULAR;
+  return GRUPO_PADRAO;
 };
+/* Escritório primeiro, Particular em seguida, os demais em ordem */
 function gruposDRE(){
-  const s = new Set([GRUPO_PADRAO]);
-  (DB.SUBCLASSES||[]).forEach(c => { const g = String(c.GRUPO||'').trim(); if (g) s.add(g); });
-  return [...s];
+  const s = new Set();
+  (DB.SUBCLASSES||[]).forEach(c => s.add(grupoDaCat(c.NOME)));
+  const resto = [...s].filter(g => g !== GRUPO_PADRAO && g !== GRUPO_PARTICULAR)
+    .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
+  return [GRUPO_PADRAO].concat(s.has(GRUPO_PARTICULAR) ? [GRUPO_PARTICULAR] : []).concat(resto);
 }
+const rotuloDRE = g => g === GRUPO_PARTICULAR ? 'DRE particular' : g;
 const GRUPOS_SUGERIDOS = ['Receita Dra. Karla','Processos particulares Dra. Karla','Despesa Dra. Karla','Obra'];
 function categorias(tipo){
   return (DB.SUBCLASSES||[])
@@ -1651,6 +1672,7 @@ function cfgGeral(){
     + inp('cgNome','Nome do escritório', cfg('NOME_ESCRITORIO'), 'full')
     + inp('cgTarifa','Tarifa bancária padrão por parcela (R$)', cfg('TARIFA_PADRAO','2,50'))
     + inp('cgFolha','Categorias tratadas como folha no painel', cfg('CATEGORIAS_FOLHA','Folha, Audiencistas'), 'full')
+    + inp('cgParticular','Categorias do DRE particular', cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO), 'full')
     + inp('cgPctNI','% dos depósitos não identificados no resultado real', cfg('PCT_NAO_IDENT','30'))
     + inp('cgPctCli','% padrão do cliente nos acordos', cfg('PCT_CLIENTE_PADRAO','70'))
     + inp('cgDias','Dias de extrato carregados na abertura', cfg('DIAS_EXTRATO','180'))
@@ -1661,6 +1683,9 @@ function cfgGeral(){
     + '</div>'
     + '<p class="mini">Separe as categorias de folha por vírgula. O percentual é o quanto dos depósitos '
     + 'sem origem definida entra no resultado real.</p>'
+    + '<p class="mini">As <b>categorias do DRE particular</b> saem do DRE do escritório e formam um DRE '
+    + 'próprio, escolhido no seletor "DRE" da tela Painel e DRE. Separe por vírgula; acento, maiúscula e '
+    + 'ponto não importam. Se uma categoria tiver grupo preenchido no cadastro de categorias, o grupo manda.</p>'
     + '<p class="mini">A <b>tolerância da conciliação</b> existe porque o extrato de um dia só chega no dia '
     + 'seguinte: com 1, o que venceu no último dia útil aparece como <i>em conciliação</i>, e não como vencido '
     + 'ou não recebido. Com 0, a cobrança volta a valer já no dia seguinte ao vencimento.</p>'
@@ -1803,6 +1828,7 @@ async function gravarGeral(){
   await salvarLote([{aba:'CONFIG', registro:{...a, VALOR:tit(val('cgNome'))}},
                     {aba:'CONFIG', registro:{...b, VALOR:val('cgTarifa')}},
                     {aba:'CONFIG', registro:{...c, VALOR:val('cgFolha')}},
+                    {aba:'CONFIG', registro:{...acha('CATEGORIAS_PARTICULAR'), VALOR:val('cgParticular')}},
                     {aba:'CONFIG', registro:{...d, VALOR:val('cgPctNI')}},
                     {aba:'CONFIG', registro:{...acha('PCT_CLIENTE_PADRAO'), VALOR:val('cgPctCli')}},
                     {aba:'CONFIG', registro:{...acha('DIAS_EXTRATO'), VALOR:val('cgDias')}},
@@ -5942,9 +5968,21 @@ function categoriasDoGrupo(tipo, grupo){
     .map(c => c.NOME)
     .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
 }
+/* Ordem do DRE: maior valor no topo. As categorias sem movimento no período
+   ficam no fim, entre si em ordem alfabética. */
 function linhasCategoria(fixas, movimentadas){
-  return [...new Set(fixas.concat(Object.keys(movimentadas)))]
-    .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
+  const v = k => Math.abs(n((movimentadas||{})[k]));
+  return [...new Set(fixas.concat(Object.keys(movimentadas||{})))]
+    .sort((a,b) => (v(b) - v(a)) || String(a).localeCompare(String(b),'pt-BR'));
+}
+/* soma vários mapas de valores: usado para ordenar as visões de vários meses */
+function somarMapas(){
+  const out = {};
+  for (let i = 0; i < arguments.length; i++){
+    const m = arguments[i] || {};
+    Object.keys(m).forEach(k => { out[k] = rd((out[k]||0) + n(m[k])); });
+  }
+  return out;
 }
 
 /* ══════════════════ INDICADORES DA CONTA CORRENTE ══════════════════ */
@@ -6113,7 +6151,7 @@ function telaPainel(){
       '<button class="btn sec" onclick="exportarCSV(\'dre\')">Exportar CSV</button>')
     + '<div class="filtros">' + selMes('fMesD', mes)
     + (grupos.length > 1
-        ? sel('fGrupo','DRE', grupos.map(g => [g,g]), grupo, '', 'onchange="setF(\'fGrupo\',this.value)"')
+        ? sel('fGrupo','DRE', grupos.map(g => [g, rotuloDRE(g)]), grupo, '', 'onchange="setF(\'fGrupo\',this.value)"')
         : '')
     + '</div>'
     + subtabs([['indicadores','Painel'],['resultado','DRE'],['comparativo','Comparar meses'],['agendado','Realizado x agendado']]);
@@ -6148,7 +6186,7 @@ function dreResultado(mes, grupo){
     + kpi('Resultado', moeda(d.resultado), d.resultado >= 0 ? 'superávit' : 'déficit', d.resultado >= 0 ? 'p' : 'n')
     + kpi('A receber (escritório)', moeda(escAberto), aberto.length + ' parcela(s) em aberto', 'd')
     + '</div>'
-    + '<div class="card"><h3>' + esc(grupo) + ' — ' + (mes ? mesBR(mes) : 'todo o período') + '</h3><div class="tw">'
+    + '<div class="card"><h3>' + esc(rotuloDRE(grupo)) + ' — ' + (mes ? mesBR(mes) : 'todo o período') + '</h3><div class="tw">'
     + '<table class="dre"><tbody>'
     + li('Receita bruta', d.bruta, 'nivel1')
     + catsRec.map(c => li(c, d.receitas[c] || 0, 'recuo', 'receita|' + c)).join('')
@@ -6177,9 +6215,9 @@ function dreComparativo(grupo){
   }
   const dados = meses.map(m => dadosDRE(m, grupo));
   const catsRec = linhasCategoria(categoriasDoGrupo('C', grupo),
-    Object.assign({}, ...dados.map(d => d.receitas)));
+    somarMapas.apply(null, dados.map(d => d.receitas)));
   const catsDesp = linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'),
-    Object.assign({}, ...dados.map(d => d.despesas)));
+    somarMapas.apply(null, dados.map(d => d.despesas)));
 
   const varia = vals => {
     const a = vals[vals.length-2], b = vals[vals.length-1];
@@ -6220,9 +6258,9 @@ function dreAgendado(mes, grupo){
   const real = dadosDRE(mes, grupo);
   const prev = agendadoDRE(mes, grupo);
   const catsRec = linhasCategoria(categoriasDoGrupo('C', grupo),
-    Object.assign({}, real.receitas, prev.receitas));
+    somarMapas(real.receitas, prev.receitas));
   const catsDesp = linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'),
-    Object.assign({}, real.despesas, prev.despesas));
+    somarMapas(real.despesas, prev.despesas));
 
   const linha = (rot, agendado, realizado, cls) => {
     const dif = rd(realizado - agendado);
