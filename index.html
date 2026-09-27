@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v9.2';
+const VERSAO_APP = 'v9.4';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -6104,7 +6104,37 @@ function painelIndicadores(mes){
     + 'Os repasses a realizar contam só os que já foram recebidos do outro lado — os que ainda esperam o crédito somam '
     + moeda(i.repassesTravados) + ' e ficam de fora. As contas a pagar em aberto aqui excluem os repasses, para não descontar duas vezes. '
     + 'O percentual dos depósitos não identificados e as categorias tratadas como folha ficam em Configurações → Geral.'
-    + '</p></div></div>';
+    + '</p></div></div>'
+    + totaisDasContas();
+}
+
+/* Os totais que antes ficavam na tela Resumo. Vieram para o Painel porque são
+   número de análise, e o Resumo passou a ser só a lista do que exige ação.
+   Guardaram os dois períodos próprios: vencimento para o que está em aberto,
+   movimento para o que já entrou ou saiu. */
+function totaisDasContas(){
+  const f = FILTROS;
+  const pracas = (DB.PRACAS||[]).filter(p => p.ATIVO !== 'NAO').map(p => [p.NOME, p.NOME]);
+  const blocos = resumoBlocos();
+  return '<div class="secao-form" style="margin-top:26px">Totais das contas</div>'
+    + '<div class="filtros">'
+    + campoData('rsAbDe','Vencimento de') + campoData('rsAbAte','até')
+    + campoData('rsMovDe','Movimento de') + campoData('rsMovAte','até')
+    + (pracas.length
+        ? sel('rsPraca','Praça', [['','Todas']].concat(pracas), f.rsPraca||'', '', 'onchange="setF(\'rsPraca\',this.value)"')
+        : '')
+    + botaoLimpar(['rsAbDe','rsAbAte','rsMovDe','rsMovAte','rsPraca'])
+    + '</div>'
+    + '<p class="mini"><b>Vencimento</b> filtra o que ainda está em aberto — contas a receber e a pagar. '
+    + '<b>Movimento</b> filtra o que já entrou ou saiu da conta — recebidas e pagas. '
+    + 'Em branco, cada bloco mostra tudo. Estes filtros são independentes do mês escolhido acima, '
+    + 'que vale para os indicadores e o DRE.</p>'
+    + blocos.map(b =>
+        '<h3 style="font-size:13px;margin:18px 0 8px;color:var(--ink2);font-weight:600">' + esc(b.titulo)
+        + (b.nota ? ' <span class="mini" style="font-weight:400">· '+esc(b.nota)+'</span>' : '') + '</h3>'
+        + '<div class="kpis">' + b.itens.map(i => kpi(i.t, i.v, i.s, i.c)).join('') + '</div>').join('')
+    + '<p class="mini" style="margin-top:14px">Pastas em execução, aguardando homologação ou aguardando guia '
+    + 'não entram nos totais de contas a receber e a pagar — elas estão suspensas.</p>';
 }
 
 function detalhePainel(chave){
@@ -6232,8 +6262,12 @@ function dreResultado(mes, grupo){
     + '<table class="dre"><tbody>'
     + li('Repasses devidos aos clientes', d.totRepasses, 'nivel1')
     + catsRep.map(c => li(c, d.repasses[c] || 0, 'recuo', 'repasse|' + c)).join('')
+    + li('Resultado do período REAL', rd(d.resultado - d.totRepasses), 'total')
     + '</tbody></table>'
     + notaForaRepasse(d.repFora)
+    + '<p class="mini" style="margin:8px 0 0"><b>Resultado do período REAL</b> = resultado do período '
+    + moeda(d.resultado) + ' menos os repasses devidos aos clientes ' + moeda(d.totRepasses)
+    + ' — é o que sobra depois de separar o dinheiro que é de terceiros.</p>'
     + '</div></div>'
     + '<p class="mini" style="margin:-6px 0 14px">Clique em qualquer linha para ver as contas que formam o total.</p>'
     + graficoMeses(grupo);
@@ -6373,13 +6407,34 @@ function detalheDRE(chave){
   const crRec = (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido' && noMes(c.DATA_RECEB));
   let titulo = '', cols = [], linhas = [], total = 0;
 
-  if (tipo === 'receita' || tipo === 'tarifas' || tipo === 'repasse'){
+  // O repasse tem tela própria: mostra TODAS as parcelas da categoria no mês e a
+  // situação do repasse de cada uma, inclusive as que não entraram na conta.
+  // Assim dá para auditar linha por linha de onde vem o total.
+  if (tipo === 'repasse'){
+    titulo = 'Repasses — ' + cat;
+    cols = ['Crédito','Pasta / cliente','Descrição','Valor do crédito','Repasse no sistema','Entrou nesta linha'];
+    const sit = cp => { const m = repasseNaoDevido(cp);
+      return m ? '<span class="tag t-pend">'+esc(m)+'</span>'
+               : '<span class="tag t-ok">em aberto</span>'
+                 + (cp.VENCIMENTO ? ' <span class="mini">venc '+dataBR(cp.VENCIMENTO)+'</span>' : ''); };
+    recb.filter(p => catParcela(p) === cat).forEach(p => {
+      const cp = repasseDe(p), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
+      total += entra; const l = lancDe(p.LANC_ID);
+      linhas.push([dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
+                   esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
+                   sit(cp), entra ? nMoeda(entra) : '—']);
+    });
+    crRec.filter(c => (c.CATEGORIA || '—') === cat).forEach(c => {
+      const cp = repasseDe(c), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
+      total += entra;
+      linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
+                   nMoeda(c.VALOR), sit(cp), entra ? nMoeda(entra) : '—']);
+    });
+
+  } else if (tipo === 'receita' || tipo === 'tarifas'){
     const casaCat = c => tipo === 'tarifas' ? grupoDaCat(c) === grupo : c === cat;
-    // no repasse vale a conta a pagar ainda em aberto; apagada ou paga, não entra
-    const valorP = p => tipo === 'tarifas' ? n(p.TARIFA)
-                      : tipo === 'repasse' ? n((repasseDevido(p)||{}).VALOR)
-                      : rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA));
-    titulo = tipo === 'tarifas' ? 'Tarifas bancárias' : (tipo === 'repasse' ? 'Repasses — ' : 'Receita — ') + cat;
+    const valorP = p => tipo === 'tarifas' ? n(p.TARIFA) : rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA));
+    titulo = tipo === 'tarifas' ? 'Tarifas bancárias' : 'Receita — ' + cat;
     cols = ['Crédito','Pasta / cliente','Descrição','Valor do crédito','Entrou nesta linha'];
     recb.filter(p => casaCat(catParcela(p))).forEach(p => {
       const v = valorP(p); if (!v) return; total += v; const l = lancDe(p.LANC_ID);
@@ -6388,7 +6443,6 @@ function detalheDRE(chave){
     });
     crRec.filter(c => casaCat(c.CATEGORIA || '—')).forEach(c => {
       const v = tipo === 'tarifas' ? n(c.TARIFA)
-              : tipo === 'repasse' ? n((repasseDevido(c)||{}).VALOR)
               : rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA));
       if (!v) return; total += v;
       linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
@@ -6506,6 +6560,12 @@ function exportarCSV(qual){
       .forEach(c => linhas.push([dataBR(c.DATA_PGTO), dataBR(c.VENCIMENTO), c.DESCRICAO,
         c.FAVORECIDO, c.CATEGORIA, nMoeda(c.VALOR), c.ORIGEM]));
   } else if (qual === 'resumo'){
+    cab = ['Pendência','Data','Quem','Descrição','Valor','Dias em atraso'];
+    resumoItens().forEach(it => it.linhas.forEach(r =>
+      linhas.push([it.titulo, dataBR(r.quando), r.quem, r.oque,
+                   r.semBoleto ? 'boleto nao recebido' : nMoeda(r.valor),
+                   vencido(r.ord) ? Math.round(diasEntre(r.ord, hoje())) : ''])));
+  } else if (qual === 'totais'){
     cab = ['Bloco','Indicador','Valor','Detalhe'];
     resumoBlocos().forEach(b => b.itens.forEach(i =>
       linhas.push([b.titulo, i.t, String(i.v).replace(/^R\$\s*/, ''), i.s])));
@@ -6960,34 +7020,143 @@ function resumoBlocos(){
   return blocos;
 }
 
+/* ══════════════════ RESUMO ══════════════════
+   Só o que exige ação. Cada cartão abre a relação dos lançamentos e cada linha
+   abre o registro. Os totais de análise ficam no Painel, em Painel e DRE. */
+function resumoItens(){
+  const antesPrimeiro = (a,b) => String(a.ord||'').localeCompare(String(b.ord||''));
+
+  /* 1 — depósitos sem origem definida */
+  const naoId = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Nao identificado' && !ehDebito(m))
+    .map(m => ({ord:m.DATA, acao:'mov', id:m.ID, quando:m.DATA,
+                quem:m.BANCO || '—', oque:m.IDENTIFICACAO || 'depósito sem identificação',
+                valor:Math.abs(n(m.VALOR))}))
+    .sort(antesPrimeiro);
+
+  /* 2 — repasses marcados como sem dados bancários do cliente */
+  const semDados = contasSemDados().filter(c => c.STATUS !== 'Pago')
+    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, quando:c.VENCIMENTO,
+                quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—', valor:n(c.VALOR)}))
+    .sort(antesPrimeiro);
+
+  /* 3 — contas a receber vencidas e ainda não recebidas */
+  const receber = pendentesReceber().filter(p => vencido(p.VENCIMENTO)).map(p => {
+    const l = lancDe(p.LANC_ID);
+    return {ord:p.VENCIMENTO, acao:'parc', id:p.LANC_ID, quando:p.VENCIMENTO,
+            quem:(l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—'),
+            oque:p.TIPO + (n(p.NUM) > 0 ? ' ' + n(p.NUM) : ''), valor:n(p.VALOR)};
+  }).concat((DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido' && vencido(c.VENCIMENTO))
+    .map(c => ({ord:c.VENCIMENTO, acao:'cr', id:c.ID, quando:c.VENCIMENTO,
+                quem:(c.PASTA ? c.PASTA + ' · ' : '') + (c.CLIENTE || '—'),
+                oque:c.DESCRICAO || '—', valor:n(c.VALOR)})))
+    .sort(antesPrimeiro);
+
+  /* 4 — contas a pagar do escritório: contas com valor e boletos ainda sem valor */
+  const pagar = (DB.CONTAS_PAGAR||[])
+    .filter(c => c.STATUS !== 'Pago' && c.CATEGORIA !== 'Repasse a cliente')
+    .filter(c => !cpEmExecucao(c) && !cpAguardando(c) && !cpAguardandoGuia(c))
+    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, quando:c.VENCIMENTO,
+                quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—',
+                valor:n(c.VALOR), semBoleto:semValorCP(c)}))
+    .sort(antesPrimeiro);
+  const boletos = pagar.filter(c => c.semBoleto).length;
+
+  /* 5 — repasses ainda devidos, do mais antigo para o mais recente */
+  const repasses = (DB.CONTAS_PAGAR||[])
+    .filter(c => c.CATEGORIA === 'Repasse a cliente' && !repasseNaoDevido(c))
+    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, quando:c.VENCIMENTO,
+                quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—', valor:n(c.VALOR)}))
+    .sort(antesPrimeiro);
+
+  const soma = L => rd(L.reduce((s,x) => s + n(x.valor), 0));
+  const atrasadas = L => L.filter(x => vencido(x.ord)).length;
+
+  return [
+    {chave:'naoid', titulo:'Depósitos não identificados', valor:moeda(soma(naoId)),
+     nota:naoId.length + ' depósito(s) sem origem definida', tom:naoId.length ? 'n' : '',
+     linhas:naoId, colQuem:'Conta', colOque:'Histórico', colQuando:'Data'},
+
+    {chave:'semdados', titulo:'Faltam dados bancários', valor:moeda(soma(semDados)),
+     nota:semDados.length + ' repasse(s) sem conta do cliente', tom:semDados.length ? 'n' : '',
+     linhas:semDados, colQuem:'Cliente', colOque:'Descrição', colQuando:'Vencimento'},
+
+    {chave:'receber', titulo:'Contas a receber vencidas', valor:moeda(soma(receber)),
+     nota:receber.length + ' lançamento(s) não recebido(s)', tom:receber.length ? 'n' : '',
+     linhas:receber, colQuem:'Pasta / cliente', colOque:'Descrição', colQuando:'Vencimento'},
+
+    {chave:'pagar', titulo:'Contas a pagar', valor:moeda(soma(pagar)),
+     nota:pagar.length + ' conta(s)' + (boletos ? ', ' + boletos + ' boleto(s) ainda sem valor' : '')
+          + (atrasadas(pagar) ? ' · ' + atrasadas(pagar) + ' vencida(s)' : ''),
+     tom:pagar.length ? 'b' : '',
+     linhas:pagar, colQuem:'Favorecido', colOque:'Descrição', colQuando:'Vencimento'},
+
+    {chave:'repasses', titulo:'Repasses devidos aos clientes', valor:moeda(soma(repasses)),
+     nota:repasses.length + ' repasse(s) a pagar'
+          + (atrasadas(repasses) ? ' · ' + atrasadas(repasses) + ' vencido(s)' : ''),
+     tom:repasses.length ? 'p' : '',
+     linhas:repasses, colQuem:'Cliente', colOque:'Descrição', colQuando:'Vencimento'}
+  ];
+}
+
+/* abre o registro por trás de uma linha do resumo */
+function abrirDoResumo(acao, id){
+  fecharModal();
+  if (acao === 'cp') return formCP(id);
+  if (acao === 'cr') return formCR(id);
+  if (acao === 'parc') return verParcelas(id);
+  if (acao === 'mov') return escolherManual(id);
+  toast('Registro não encontrado — ele pode ter sido excluído.','erro');
+}
+
+/* a relação de um cartão do resumo */
+function detalheResumo(chave){
+  const it = resumoItens().find(x => x.chave === chave);
+  if (!it) return;
+  const L = it.linhas;
+  const corpo = !L.length
+    ? vazio('Nada aqui', 'Nenhum lançamento nesta situação.')
+    : '<div class="tw" style="max-height:440px;overflow:auto"><table class="densa"><thead><tr>'
+      + '<th>' + esc(it.colQuando) + '</th><th>' + esc(it.colQuem) + '</th>'
+      + '<th>' + esc(it.colOque) + '</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
+      + L.map(r => '<tr'+(vencido(r.ord) ? ' class="grifo"' : '')+'>'
+        + '<td>'+dataBR(r.quando)
+          + (vencido(r.ord) ? '<div class="mini neg">' + Math.round(diasEntre(r.ord, hoje()))
+              + ' dia(s) em atraso</div>' : '')
+          + (emConciliacao(r.ord) ? '<div class="mini"><span class="tag t-pend">em conciliação</span></div>' : '')
+          + '</td>'
+        + '<td>'+esc(r.quem)+'</td>'
+        + '<td>'+esc(r.oque)+'</td>'
+        + '<td class="num">'+(r.semBoleto ? '<span class="mini">boleto não recebido</span>' : nMoeda(r.valor))+'</td>'
+        + '<td style="text-align:right"><button class="btn sm sec" '
+          + 'onclick="abrirDoResumo(\''+r.acao+'\',\''+esc(r.id)+'\')">Abrir</button></td></tr>').join('')
+      + '</tbody><tfoot><tr class="total"><td colspan="3">Total</td>'
+      + '<td class="num">'+nMoeda(rd(L.reduce((s,x) => s + n(x.valor), 0)))+'</td><td></td></tr></tfoot></table></div>'
+      + '<p class="mini" style="margin-top:10px">Clique em <b>Abrir</b> para entrar no lançamento.</p>';
+  modal(it.titulo, corpo, '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
+}
+
 function telaResumo(){
-  const f = FILTROS;
-  const blocos = resumoBlocos();
-  const pracas = (DB.PRACAS||[]).filter(p => p.ATIVO !== 'NAO').map(p => [p.NOME, p.NOME]);
+  const itens = resumoItens();
+  const cartao = i =>
+    '<div class="kpi '+(i.tom||'d')+' abrir" style="cursor:pointer" onclick="detalheResumo(\''+i.chave+'\')">'
+    + '<div class="rot">'+esc(i.titulo)+' <span class="lupa">›</span></div>'
+    + '<div class="val">'+esc(i.valor)+'</div><div class="sub">'+esc(i.nota)+'</div></div>';
 
-  const corpo = blocos.map(b =>
-    '<h3 style="font-size:13px;margin:18px 0 8px;color:var(--ink2);font-weight:600">' + b.titulo
-    + (b.nota ? ' <span class="mini" style="font-weight:400">· '+b.nota+'</span>' : '') + '</h3>'
-    + '<div class="kpis">' + b.itens.map(i => kpi(i.t, i.v, i.s, i.c)).join('') + '</div>').join('');
-
-  return cabec('Resumo', 'Os totais das contas num lugar só, com período próprio para o que está em aberto e para o que já se movimentou.',
+  return cabec('Resumo', 'O que está pendente de ação. Clique em qualquer valor para ver os lançamentos e entrar neles.',
       '<button class="btn sec" onclick="exportarCSV(\'resumo\')">Exportar CSV</button>')
-    + '<div class="filtros">'
-    + campoData('rsAbDe','Vencimento de') + campoData('rsAbAte','até')
-    + campoData('rsMovDe','Movimento de') + campoData('rsMovAte','até')
-    + (pracas.length
-        ? sel('rsPraca','Praça', [['','Todas']].concat(pracas), f.rsPraca||'', '', 'onchange="setF(\'rsPraca\',this.value)"')
-        : '')
-    + botaoLimpar(['rsAbDe','rsAbAte','rsMovDe','rsMovAte','rsPraca'])
-    + '</div>'
-    + '<div class="card" style="border-left:3px solid var(--brand)"><div class="corpo"><p class="mini">'
-    + '<b>Vencimento</b> filtra o que ainda está em aberto — contas a receber e a pagar. '
-    + '<b>Movimento</b> filtra o que já entrou ou saiu da conta — recebidas e pagas. '
-    + 'Deixando em branco, cada bloco mostra tudo.'
-    + '</p></div></div>'
-    + corpo
-    + '<p class="mini" style="margin-top:14px">Pastas em execução, aguardando homologação ou aguardando guia não entram '
-    + 'nos totais de contas a receber e a pagar — elas estão suspensas.</p>';
+    + '<div class="kpis">' + itens.map(cartao).join('') + '</div>'
+    + '<div class="card"><div class="tw"><table class="densa"><thead><tr>'
+    + '<th>Pendência</th><th class="num">Quantidade</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
+    + itens.map(i => '<tr><td>'+esc(i.titulo)+'</td>'
+      + '<td class="num">'+i.linhas.length+'</td>'
+      + '<td class="num">'+esc(i.valor)+'</td>'
+      + '<td style="text-align:right"><button class="btn sm sec" onclick="detalheResumo(\''+i.chave+'\')">'
+      + 'Ver lançamentos</button></td></tr>').join('')
+    + '</tbody></table></div></div>'
+    + '<p class="mini">Os repasses aparecem do mais antigo para o mais recente, então o que está devendo há '
+    + 'mais tempo fica no topo. Pastas em execução, aguardando homologação ou aguardando guia estão suspensas '
+    + 'e ficam fora. Os totais de receita, despesa e movimento do período ficam no <b>Painel</b>, '
+    + 'em Painel e DRE.</p>';
 }
 
 /* ══ Mudança de rateio em massa: 70/30 → 67/33, por exemplo ═══════════════
