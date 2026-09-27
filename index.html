@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v9.1';
+const VERSAO_APP = 'v9.2';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -903,6 +903,19 @@ function repasseDe(reg){
   if (porId && String(porId.CATEGORIA||'') === 'Repasse a cliente') return porId;
   return ix.cpPorParcela.get(reg.ID) || null;
 }
+/* Por que um repasse que existe não é mais devido. Vazio = é devido.
+   É o mesmo critério da tela de contas a pagar em aberto, para os dois
+   números nunca discordarem. */
+function repasseNaoDevido(cp){
+  if (!cp) return 'apagado';
+  if (String(cp.STATUS||'') === 'Pago') return 'pago';
+  if (cpEmExecucao(cp)) return 'pasta em execução';
+  if (cpAguardando(cp)) return 'pasta aguardando homologação';
+  if (cpAguardandoGuia(cp)) return 'pasta aguardando guia';
+  return '';
+}
+/* o repasse que ainda está em aberto no sistema, ou null */
+const repasseDevido = reg => { const cp = repasseDe(reg); return repasseNaoDevido(cp) ? null : cp; };
 /* guarda o resultado de contas pesadas até os dados mudarem */
 function memo(chave, fn){
   const c = indices().cache;
@@ -5904,7 +5917,7 @@ function dadosDRE(mes, grupo){
   const doGrupo = cat => grupoDaCat(cat) === grupo;
   const catParcela = p => p.TIPO === 'Sucumbência' ? 'Sucumbência' : (lancDe(p.LANC_ID).SUBCLASSE || '—');
 
-  const receitas = {}, despesas = {}, repasses = {};
+  const receitas = {}, despesas = {}, repasses = {}, fora = {};
   let tarifas = 0;
   const soma = (obj, k, v) => { if (!v) return; obj[k] = rd((obj[k] || 0) + v); };
 
@@ -5915,7 +5928,9 @@ function dadosDRE(mes, grupo){
       soma(receitas, catParcela(p), rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA) - sp));
       if (sp) soma(receitas, 'Sucumbência', sp);      // a fatia de sucumbência vira linha própria
       const rpP = repasseDe(p);                   // apagado do sistema não entra
-      if (rpP) soma(repasses, catParcela(p), n(rpP.VALOR));
+      const forP = repasseNaoDevido(rpP);
+      if (!forP) soma(repasses, catParcela(p), n(rpP.VALOR));
+      else if (rpP) soma(fora, forP, n(rpP.VALOR));
       tarifas = rd(tarifas + n(p.TARIFA));
     });
 
@@ -5925,7 +5940,9 @@ function dadosDRE(mes, grupo){
       const cat = c.CATEGORIA || '—';
       soma(receitas, cat, rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA)));
       const rpC = repasseDe(c);
-      if (rpC) soma(repasses, cat, n(rpC.VALOR));
+      const forC = repasseNaoDevido(rpC);
+      if (!forC) soma(repasses, cat, n(rpC.VALOR));
+      else if (rpC) soma(fora, forC, n(rpC.VALOR));
       tarifas = rd(tarifas + n(c.TARIFA));
     });
 
@@ -5936,6 +5953,7 @@ function dadosDRE(mes, grupo){
   const bruta = rd(Object.values(receitas).reduce((s,v) => s + v, 0) + tarifas);
   const totDesp = rd(Object.values(despesas).reduce((s,v) => s + v, 0));
   return { receitas, despesas, repasses, tarifas, bruta, totDesp, resultado: rd(bruta - totDesp),
+           repFora: fora,
            totRepasses: rd(Object.values(repasses).reduce((s,v) => s + v, 0)) };
 }
 
@@ -6214,9 +6232,25 @@ function dreResultado(mes, grupo){
     + '<table class="dre"><tbody>'
     + li('Repasses devidos aos clientes', d.totRepasses, 'nivel1')
     + catsRep.map(c => li(c, d.repasses[c] || 0, 'recuo', 'repasse|' + c)).join('')
-    + '</tbody></table></div></div>'
+    + '</tbody></table>'
+    + notaForaRepasse(d.repFora)
+    + '</div></div>'
     + '<p class="mini" style="margin:-6px 0 14px">Clique em qualquer linha para ver as contas que formam o total.</p>'
     + graficoMeses(grupo);
+}
+
+/* O que a linha de repasses NÃO inclui, e por quê. Sem isso um valor sairia do
+   DRE sem explicação e pareceria erro. */
+function notaForaRepasse(fora){
+  const chaves = Object.keys(fora||{}).filter(k => n(fora[k]));
+  if (!chaves.length)
+    return '<p class="mini" style="margin:8px 0 0">Só entram os repasses que ainda constam em contas a '
+         + 'pagar em aberto. Repasse já pago, apagado ou de pasta suspensa fica fora.</p>';
+  const total = rd(chaves.reduce((s,k) => s + n(fora[k]), 0));
+  return '<p class="mini" style="margin:8px 0 0">Só entram os repasses que ainda constam em contas a pagar '
+       + 'em aberto. Fora desta conta, no período: <b>' + moeda(total) + '</b> — '
+       + chaves.sort((a,b) => n(fora[b]) - n(fora[a]))
+           .map(k => moeda(n(fora[k])) + ' ' + esc(k)).join(' · ') + '.</p>';
 }
 
 function dreComparativo(grupo){
@@ -6341,9 +6375,9 @@ function detalheDRE(chave){
 
   if (tipo === 'receita' || tipo === 'tarifas' || tipo === 'repasse'){
     const casaCat = c => tipo === 'tarifas' ? grupoDaCat(c) === grupo : c === cat;
-    // no repasse vale a conta a pagar que existe; apagada, não entra
+    // no repasse vale a conta a pagar ainda em aberto; apagada ou paga, não entra
     const valorP = p => tipo === 'tarifas' ? n(p.TARIFA)
-                      : tipo === 'repasse' ? n((repasseDe(p)||{}).VALOR)
+                      : tipo === 'repasse' ? n((repasseDevido(p)||{}).VALOR)
                       : rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA));
     titulo = tipo === 'tarifas' ? 'Tarifas bancárias' : (tipo === 'repasse' ? 'Repasses — ' : 'Receita — ') + cat;
     cols = ['Crédito','Pasta / cliente','Descrição','Valor do crédito','Entrou nesta linha'];
@@ -6354,7 +6388,7 @@ function detalheDRE(chave){
     });
     crRec.filter(c => casaCat(c.CATEGORIA || '—')).forEach(c => {
       const v = tipo === 'tarifas' ? n(c.TARIFA)
-              : tipo === 'repasse' ? n((repasseDe(c)||{}).VALOR)
+              : tipo === 'repasse' ? n((repasseDevido(c)||{}).VALOR)
               : rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA));
       if (!v) return; total += v;
       linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
