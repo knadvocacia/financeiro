@@ -289,7 +289,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v8.7';
+const VERSAO_APP = 'v8.8';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -374,7 +374,9 @@ function toast(msg, tipo){
 }
 function carregandoOn(msg){ $('#msgCarregando').textContent = msg || 'Carregando…'; $('#carregando').classList.add('on'); }
 function carregandoOff(){ $('#carregando').classList.remove('on'); }
-const cfg = (k, pad) => { const r = (DB.CONFIG||[]).find(c => c.CHAVE === k); return r ? r.VALOR : (pad||''); };
+/* DB nunca pode ser undefined: uma carga malsucedida deixava a base sem objeto
+   e daí TODA chamada a cfg() estourava "Cannot read properties of undefined". */
+const cfg = (k, pad) => { const r = (((DB||{}).CONFIG)||[]).find(c => c.CHAVE === k); return r ? r.VALOR : (pad||''); };
 
 /* ── SITUAÇÃO DA CONEXÃO ── */
 const NET = { pendentes:0, ultimo:'', erro:'' };
@@ -465,6 +467,8 @@ function diagnosticoResposta(r, txt){
 /* busca uma aba inteira, quando a tela precisa do histórico completo */
 async function carregarAba(aba){
   const j = await api({action:'carregarAba', aba});
+  if (!j || !Array.isArray(j.dados)) throw new Error('O servidor não devolveu os dados de ' + aba + '.');
+  if (!DB) DB = {};
   DB[aba] = j.dados;
   if (aba === 'EXTRATO') DB._extratoParcial = false;
   invalidarIdx();
@@ -530,8 +534,21 @@ async function reenviarPendencias(){
   FILA.apagar = (p.apagar||[]).concat(FILA.apagar);
   await descarregarFila();
   if (!pendenciasGuardadas()){
+    // Os registros reenviados já SÃO a versão definitiva: aplica na base aqui
+    // e repinta. Antes isso disparava um carregar() completo, ou seja, uma
+    // segunda carga inteira em quase toda abertura — era metade da demora.
+    if (!DB) DB = {};
+    (p.lote||[]).forEach(it => {
+      if (!it || !it.aba || !it.registro || !it.registro.ID) return;
+      const L = DB[it.aba] || (DB[it.aba] = []);
+      const i = L.findIndex(x => x.ID === it.registro.ID);
+      if (i >= 0) L[i] = it.registro; else L.push(it.registro);
+    });
+    (p.apagar||[]).forEach(a => {
+      if (a && a.aba) DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id);
+    });
+    invalidarIdx(); render();
     toast(qtd + ' alteração(ões) recuperada(s) e salva(s).','ok');
-    await carregar();
   }
 }
 
@@ -636,10 +653,15 @@ async function carregar(avisar){
   carregandoOn('Carregando dados…');
   try{
     const j = await api({action:'carregar', dias: n(cfg('DIAS_EXTRATO','180')) || 180});
-    DB = j.dados; DB._planilha = j.planilha; DB._pasta = j.pasta; DB._versao = j.versao;
-    DB._extratoParcial = !!j.dados._extratoParcial;
-    DB._extratoTotal = j.dados._extratoTotal;
-    DB._extratoCorte = j.dados._extratoCorte;
+    // A base só é substituída depois de conferida. Antes, uma resposta sem
+    // "dados" zerava DB e o sistema ficava travado até recarregar a página.
+    const d = j && j.dados;
+    if (!d || typeof d !== 'object' || Array.isArray(d))
+      throw new Error('O servidor respondeu sem os dados. Nada foi alterado aqui — tente atualizar de novo.');
+    DB = d; DB._planilha = j.planilha; DB._pasta = j.pasta; DB._versao = j.versao;
+    DB._extratoParcial = !!d._extratoParcial;
+    DB._extratoTotal = d._extratoTotal;
+    DB._extratoCorte = d._extratoCorte;
     invalidarIdx();
     $('#hdEscritorio').textContent = cfg('NOME_ESCRITORIO','Escritório de advocacia');
     const marca = document.getElementById('hdMarca');
@@ -891,6 +913,34 @@ function proximoDiaUtil(iso){
   }
   return iso;
 }
+/* dia útil anterior a uma data: volta um dia e pula sábado, domingo e feriado */
+function diaUtilAnterior(iso){
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(String(iso))) return iso;
+  const d = new Date(String(iso) + 'T12:00');
+  for (let i = 0; i < 12; i++){
+    d.setDate(d.getDate() - 1);
+    const s = isoDia(d);
+    if (ehDiaUtil(s)) return s;
+  }
+  return iso;
+}
+
+/* ── Tolerância da conciliação (D+1) ───────────────────────────────────────
+   O extrato de um dia só chega no dia seguinte. Então o que venceu no último
+   dia útil ainda NÃO está em atraso: está em conciliação, esperando o extrato.
+   Quantos dias úteis de tolerância é configurável em Configurações → Geral;
+   0 volta ao comportamento antigo, de cobrar já no dia seguinte. */
+function diasConciliacao(){ const v = cfg('DIAS_CONCILIACAO','1'); return v === '' ? 1 : Math.max(0, n(v)); }
+function limiteAtraso(){
+  let d = hoje();
+  for (let i = 0; i < diasConciliacao(); i++) d = diaUtilAnterior(d);
+  return d;
+}
+/* vencido de verdade: antes da janela que ainda está sendo conciliada */
+const vencido = iso => { const s = String(iso||''); return s !== '' && s < limiteAtraso(); };
+/* dentro da janela: venceu, mas o extrato do dia ainda não chegou */
+const emConciliacao = iso => { const s = String(iso||''); return s !== '' && s < hoje() && s >= limiteAtraso(); };
+
 /* mostra na tela quando a data escolhida será adiada */
 function avisoDiaUtil(iso){
   const box = document.getElementById('avisoUtil'); if (!box) return;
@@ -1567,12 +1617,16 @@ function cfgGeral(){
     + inp('cgPctNI','% dos depósitos não identificados no resultado real', cfg('PCT_NAO_IDENT','30'))
     + inp('cgPctCli','% padrão do cliente nos acordos', cfg('PCT_CLIENTE_PADRAO','70'))
     + inp('cgDias','Dias de extrato carregados na abertura', cfg('DIAS_EXTRATO','180'))
+    + inp('cgConcil','Dias úteis de tolerância da conciliação', cfg('DIAS_CONCILIACAO','1'))
     + '<div class="check full"><input type="checkbox" id="cgUtil"'
       + (String(cfg('DIA_UTIL','SIM')).toUpperCase() === 'NAO' ? '' : ' checked') + '>'
       + '<label for="cgUtil">Adiar vencimentos de sábado, domingo e feriado nacional para o próximo dia útil</label></div>'
     + '</div>'
     + '<p class="mini">Separe as categorias de folha por vírgula. O percentual é o quanto dos depósitos '
     + 'sem origem definida entra no resultado real.</p>'
+    + '<p class="mini">A <b>tolerância da conciliação</b> existe porque o extrato de um dia só chega no dia '
+    + 'seguinte: com 1, o que venceu no último dia útil aparece como <i>em conciliação</i>, e não como vencido '
+    + 'ou não recebido. Com 0, a cobrança volta a valer já no dia seguinte ao vencimento.</p>'
     + '<div style="margin-top:14px"><button class="btn" onclick="gravarGeral()">Salvar configurações</button></div>'
     + '<div class="secao-form" style="margin-top:22px">Conferência com a nuvem</div>'
     + '<p class="mini">Compara o que está na tela com o que existe de fato na planilha do Google, '
@@ -1715,6 +1769,7 @@ async function gravarGeral(){
                     {aba:'CONFIG', registro:{...d, VALOR:val('cgPctNI')}},
                     {aba:'CONFIG', registro:{...acha('PCT_CLIENTE_PADRAO'), VALOR:val('cgPctCli')}},
                     {aba:'CONFIG', registro:{...acha('DIAS_EXTRATO'), VALOR:val('cgDias')}},
+                    {aba:'CONFIG', registro:{...acha('DIAS_CONCILIACAO'), VALOR:val('cgConcil')}},
                     {aba:'CONFIG', registro:{...acha('DIA_UTIL'), VALOR: val('cgUtil') ? 'SIM' : 'NAO'}}]);
   $('#hdEscritorio').textContent = val('cgNome') || 'Escritório de advocacia';
   toast('Configurações salvas.','ok'); abrirConfig('geral');
@@ -2614,7 +2669,9 @@ function relatorioSemDados(){
   const aVencer = L.filter(c => !atrasadaCP(c) && c.STATUS !== 'Pago');
   const soma = arr => arr.reduce((s,c) => s + n(c.VALOR), 0);
   const linha = c => '<tr'+(atrasadaCP(c) ? ' class="grifo"' : '')+'>'
-    + '<td>'+dataBR(c.VENCIMENTO)+(atrasadaCP(c) ? '<div class="mini neg">'
+    + '<td>'+dataBR(c.VENCIMENTO)
+        + (conciliandoCP(c) ? '<div class="mini"><span class="tag t-pend">em conciliação</span></div>' : '')
+        + (atrasadaCP(c) ? '<div class="mini neg">'
         + Math.round(diasEntre(c.VENCIMENTO, hoje())) + ' dia(s) em atraso</div>' : '')+'</td>'
     + '<td>'+esc(c.FAVORECIDO||'—')+'</td><td>'+esc(c.DESCRICAO||'—')+'</td>'
     + '<td>'+selo(c)+'</td><td class="num">'+nMoeda(c.VALOR)+'</td>'
@@ -4908,11 +4965,14 @@ function telaReceber(){
   L = L.filter(r => casa(r, ['pasta','cliente','proc','desc','cat','sub'], t))
        .filter(r => entreDatas(r.venc, FILTROS.arDe, FILTROS.arAte))
        .filter(r => !mes || mesDe(r.venc) === mes)
-       .filter(r => !sit || (sit === 'vencidas' ? r.venc < hj : r.venc >= hj))
+       .filter(r => !sit || (sit === 'vencidas' ? vencido(r.venc)
+                           : sit === 'conciliando' ? emConciliacao(r.venc)
+                           : !vencido(r.venc) && !emConciliacao(r.venc)))
        .sort((a,b) => String(a.venc).localeCompare(String(b.venc)));
 
   const total = L.reduce((s,r) => s + r.valor, 0);
-  const vencidas = L.filter(r => r.venc < hj);
+  const vencidas = L.filter(r => vencido(r.venc));
+  const conciliando = L.filter(r => emConciliacao(r.venc));
 
   SELR_VISIVEIS = L.map(r => r.id);
   SELR = new Set([...SELR].filter(id => SELR_VISIVEIS.includes(id)));   // some o que saiu do filtro
@@ -4947,7 +5007,7 @@ function telaReceber(){
     + '<div class="filtros">' + campoBusca('Pasta, cliente, processo ou descrição…')
     + campoData('arDe','Vencimento de') + campoData('arAte','até')
     + selMes('fMesR', mes)
-    + sel('fSit','Situação',[['','Todas'],['vencidas','Vencidas'],['aVencer','A vencer']], sit,'','onchange="setF(\'fSit\',this.value)"')
+    + sel('fSit','Situação',[['','Todas'],['vencidas','Vencidas'],['conciliando','Em conciliação'],['aVencer','A vencer']], sit,'','onchange="setF(\'fSit\',this.value)"')
     + botaoLimpar(['busca','arDe','arAte','fMesR','fSit']) + '</div>'
     + (selecionados.length
         ? '<div class="barraSel"><b>'+selecionados.length+'</b> selecionado(s) · '
@@ -4961,10 +5021,13 @@ function telaReceber(){
       + ' style="width:16px;height:16px;accent-color:var(--brand)" onchange="selecionarTodosReceber(this.checked)"></th>'
     + '<th>Vencimento</th><th>Pasta / cliente</th><th>Descrição</th><th>Categoria</th>'
     + '<th>Processo</th><th class="num">Valor</th><th class="num">Cliente</th><th class="num">Escritório</th><th></th></tr></thead><tbody>'
-    + (L.length ? L.map(r => '<tr'+(SELR.has(r.id) ? ' class="sel"' : r.venc < hj ? ' class="grifo"' : '')+'>'
+    + (L.length ? L.map(r => '<tr'+(SELR.has(r.id) ? ' class="sel"' : vencido(r.venc) ? ' class="grifo"' : '')+'>'
       + '<td><input type="checkbox" '+(SELR.has(r.id)?'checked':'')
         + ' style="width:16px;height:16px;accent-color:var(--brand)" onchange="marcarReceber(\''+r.id+'\',this.checked)"></td>'
-      + '<td>'+dataBR(r.venc)+'</td>'
+      + '<td>'+dataBR(r.venc)
+        + (emConciliacao(r.venc) ? '<div class="mini"><span class="tag t-pend">em conciliação</span></div>' : '')
+        + (vencido(r.venc) ? '<div class="mini neg">'
+            + Math.round(diasEntre(r.venc, hoje())) + ' dia(s) em atraso</div>' : '')+'</td>'
       + '<td>'+pastaCliente(r.pasta, r.cliente)+'</td>'
       + '<td>'+esc(r.desc)+'</td>'
       + '<td>'+esc(r.cat||'—')+(r.sub ? '<div class="mini">'+esc(r.sub)+'</div>' : '')+'</td>'
@@ -5266,7 +5329,9 @@ function selo(c){
 /* conta recorrente ainda sem boleto: valor em branco */
 const semValorCP = c => c.STATUS !== 'Pago' && !n(c.VALOR);
 const semDadosCP = c => String(c.SEM_DADOS||'').toUpperCase() === 'SIM';
-const atrasadaCP = c => c.STATUS !== 'Pago' && String(c.VENCIMENTO||'') < hoje();
+const atrasadaCP = c => c.STATUS !== 'Pago' && vencido(c.VENCIMENTO);
+/* venceu, mas o extrato do dia ainda não chegou: em conciliação, não em atraso */
+const conciliandoCP = c => c.STATUS !== 'Pago' && emConciliacao(c.VENCIMENTO);
 function filtraLib(c, f){
   if (!f) return true;
   if (f === 'banco') return semDadosCP(c);
@@ -5381,7 +5446,9 @@ function painelSemDados(){
   const aVencer = L.filter(c => !atrasadaCP(c) && c.STATUS !== 'Pago');
   const soma = arr => arr.reduce((s,c) => s + n(c.VALOR), 0);
   const linha = c => '<tr'+(atrasadaCP(c) ? ' class="grifo"' : '')+'>'
-    + '<td>'+dataBR(c.VENCIMENTO)+(atrasadaCP(c) ? '<div class="mini neg">'
+    + '<td>'+dataBR(c.VENCIMENTO)
+        + (conciliandoCP(c) ? '<div class="mini"><span class="tag t-pend">em conciliação</span></div>' : '')
+        + (atrasadaCP(c) ? '<div class="mini neg">'
         + Math.round(diasEntre(c.VENCIMENTO, hoje())) + ' dia(s) em atraso</div>' : '')+'</td>'
     + '<td>'+esc(c.FAVORECIDO||'—')+'</td><td>'+esc(c.DESCRICAO||'—')+'</td>'
     + '<td>'+selo(c)+'</td><td class="num">'+nMoeda(c.VALOR)+'</td>'
@@ -5428,7 +5495,7 @@ function telaPagar(){
   const L = base.filter(c => filtraLib(c, FILTROS.fLib))
     .sort((a,b) => String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO)));
   const abertas = L;
-  const atraso = abertas.filter(c => c.VENCIMENTO < hj && liberacao(c).tipo !== 'nao');
+  const atraso = abertas.filter(c => vencido(c.VENCIMENTO) && liberacao(c).tipo !== 'nao');
   const liberadas = abertas.filter(c => liberacao(c).tipo !== 'nao');
   const travadas = abertas.filter(c => liberacao(c).tipo === 'nao');
   const semBoleto = abertas.filter(semValorCP);
@@ -5452,9 +5519,11 @@ function telaPagar(){
     + '</div>' + botoesLib(base)
     + '<div class="card"><div class="tw"><table><thead><tr><th style="text-align:center">Recebido</th><th>Vencimento</th><th>Descrição</th><th>Favorecido</th>'
     + '<th>Categoria</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
-    + (L.length ? L.map(c => '<tr'+(c.VENCIMENTO<hj && liberacao(c).tipo!=='nao' ? ' class="grifo"' : '')+'>'
+    + (L.length ? L.map(c => '<tr'+(vencido(c.VENCIMENTO) && liberacao(c).tipo!=='nao' ? ' class="grifo"' : '')+'>'
       + '<td style="text-align:center">'+selo(c)+'</td>'
-      + '<td>'+dataBR(c.VENCIMENTO)+'</td><td'+(c.OBS?' title="'+esc(c.OBS)+'"':'')+'>'+esc(c.DESCRICAO)
+      + '<td>'+dataBR(c.VENCIMENTO)
+        + (conciliandoCP(c) ? '<div class="mini"><span class="tag t-pend">em conciliação</span></div>' : '')
+        + '</td><td'+(c.OBS?' title="'+esc(c.OBS)+'"':'')+'>'+esc(c.DESCRICAO)
       + (anexosDe(c).length
           ? ' <a href="'+esc(urlAnexo(anexosDe(c)[0]))+'" target="_blank" rel="noopener" title="Abrir o anexo">📎'
             + (anexosDe(c).length > 1 ? '<sup>'+anexosDe(c).length+'</sup>' : '') + '</a>' : '')
@@ -6686,7 +6755,8 @@ function resumoBlocos(){
       esc:n(c.VALOR_ESCRITORIO) || n(c.VALOR), praca:c.PRACA||''})))
     .filter(r => noPeriodo(r.venc, f.rsAbDe, f.rsAbAte))
     .filter(r => !f.rsPraca || r.praca === f.rsPraca);
-  const arVenc = ar.filter(r => String(r.venc) < hj);
+  const arVenc = ar.filter(r => vencido(r.venc));
+  const arConc = ar.filter(r => emConciliacao(r.venc));
 
   /* ── recebidas ── */
   const rec = (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida').map(p => {
@@ -6706,7 +6776,8 @@ function resumoBlocos(){
   const ap = (DB.CONTAS_PAGAR||[])
     .filter(c => c.STATUS !== 'Pago' && !cpEmExecucao(c) && !cpAguardando(c) && !cpAguardandoGuia(c))
     .filter(c => noPeriodo(c.VENCIMENTO, f.rsAbDe, f.rsAbAte));
-  const apVenc = ap.filter(c => String(c.VENCIMENTO) < hj && n(c.VALOR) > 0);
+  const apVenc = ap.filter(c => vencido(c.VENCIMENTO) && n(c.VALOR) > 0);
+  const apConc = ap.filter(c => emConciliacao(c.VENCIMENTO) && n(c.VALOR) > 0);
   const apLib = ap.filter(c => liberacao(c).tipo === 'ok');
   const apTrav = ap.filter(c => liberacao(c).tipo === 'nao');
   const apSemBoleto = ap.filter(semValorCP);
@@ -6726,6 +6797,8 @@ function resumoBlocos(){
     {titulo:'Contas a receber', nota:ar.length + ' lançamento(s) em aberto', itens:[
       {t:'Em aberto', v:moeda(soma(ar,'valor')), s:ar.length + ' lançamento(s)', c:'d'},
       {t:'Vencidas', v:moeda(soma(arVenc,'valor')), s:arVenc.length + ' em atraso', c:arVenc.length ? 'n' : ''},
+      {t:'Em conciliação', v:moeda(soma(arConc,'valor')),
+       s:arConc.length + ' aguardando o extrato do dia', c:arConc.length ? 'b' : ''},
       {t:'Parte do cliente', v:moeda(soma(ar,'cli')), s:'repasse previsto, já sem a tarifa', c:'b'},
       {t:'Parte do escritório', v:moeda(soma(ar,'esc')), s:'receita prevista, com a tarifa', c:'p'}
     ]},
@@ -6739,6 +6812,8 @@ function resumoBlocos(){
     {titulo:'Contas a pagar', nota:ap.length + ' conta(s) em aberto', itens:[
       {t:'Em aberto', v:moeda(soma(ap)), s:ap.length + ' conta(s)', c:'b'},
       {t:'Vencidas', v:moeda(soma(apVenc)), s:apVenc.length + ' em atraso', c:apVenc.length ? 'n' : ''},
+      {t:'Em conciliação', v:moeda(soma(apConc)),
+       s:apConc.length + ' aguardando o extrato do dia', c:apConc.length ? 'b' : ''},
       {t:'Liberadas para pagamento', v:moeda(soma(apLib)), s:apLib.length + ' conta(s) com ✓', c:'p'},
       {t:'Aguardando recebimento', v:moeda(soma(apTrav)), s:apTrav.length + ' repasse(s) com ✕', c:apTrav.length ? 'n' : ''},
       {t:'Boletos não recebidos', v:apSemBoleto.length, s:'contas recorrentes ainda sem valor', c:apSemBoleto.length ? 'b' : ''}
