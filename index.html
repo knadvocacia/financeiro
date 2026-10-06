@@ -314,7 +314,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.4';
+const VERSAO_APP = 'v10.5';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -6162,12 +6162,12 @@ function ajustarComissoes(refId, baseAntiga, baseNova){
 }
 /* Sem baixa manual: um pagamento só se efetiva conciliando o débito no extrato bancário. */
 /* ══════════════════ COMISSÕES ══════════════════ */
-function telaComissoes(){
+/* Os recebimentos da tela de Comissões, já filtrados. Uma só fonte para a
+   tela, a planilha e a impressão: o relatório sai com o que está na frente. */
+function dadosComissoes(){
   const mes = FILTROS.fMesC || '', t = FILTROS.busca;
   const coms = (DB.COMISSIONADOS||[]).filter(c => c.ATIVO !== 'NAO');
-  const todas = (DB.COMISSOES||[]).filter(c => !mes || mesDe(c.DATA) === mes);
 
-  // uma linha por recebimento conciliado
   let recs = (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida').map(p => {
     const l = lancDe(p.LANC_ID);
     return {p, l, data:p.DATA_CREDITO, cliente:l.CLIENTE||'—', pasta:l.PASTA||'—',
@@ -6176,7 +6176,6 @@ function telaComissoes(){
             base:rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA)),
             itens:(DB.COMISSOES||[]).filter(c => c.PARCELA_ID === p.ID)};
   });
-  // recebimentos avulsos conciliados também geram comissão
   (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido').forEach(c => {
     const esc2 = n(c.VALOR_ESCRITORIO) || n(c.VALOR);
     recs.push({p:null, l:{}, data:c.DATA_RECEB, cliente:c.CLIENTE || c.DESCRICAO || '—',
@@ -6187,6 +6186,73 @@ function telaComissoes(){
   recs = recs.filter(r => !mes || mesDe(r.data) === mes)
     .filter(r => casa(r, ['cliente','pasta','sub'], t))
     .sort((a,b) => String(b.data).localeCompare(String(a.data)));
+
+  const filtros = [];
+  if (mes) filtros.push(mesBR(mes));
+  if (t) filtros.push('busca "' + t + '"');
+
+  // na planilha, valor numérico quando há comissão; o motivo por extenso quando não há
+  const celula = (r, c) => {
+    const it = r.itens.find(x => x.COMISSIONADO_ID === c.ID);
+    if (it) return rd(n(it.VALOR));
+    const m2 = motivoSemComissao(r, c.ID);
+    return m2 ? m2.curto : '';
+  };
+  const situacao = r => coms.map(c => {
+    const it = r.itens.find(x => x.COMISSIONADO_ID === c.ID);
+    return it ? c.NOME + ': ' + (it.STATUS || 'A pagar').toLowerCase() : '';
+  }).filter(Boolean).join(' · ');
+
+  return {
+    recs, coms, mes, filtros:filtros.join(' · '),
+    cab: ['Crédito','Pasta','Cliente','Categoria','Caiu na conta','Para o escritório','Base padrão']
+         .concat(coms.map(c => c.NOME)).concat(['Total das comissões','Situação']),
+    linhas: recs.map(r => [dataBR(r.data), r.pasta, r.cliente, r.sub,
+        rd(n(r.caiu)), rd(n(r.esc)), rd(n(r.base))]
+      .concat(coms.map(c => celula(r, c)))
+      .concat([rd(r.itens.reduce((t2,x) => t2 + n(x.VALOR), 0)), situacao(r)])),
+    totais: {
+      caiu: rd(recs.reduce((t2,r) => t2 + n(r.caiu), 0)),
+      esc: rd(recs.reduce((t2,r) => t2 + n(r.esc), 0)),
+      base: rd(recs.reduce((t2,r) => t2 + n(r.base), 0)),
+      porCom: coms.map(c => rd(recs.reduce((t2,r) =>
+        t2 + n((r.itens.find(x => x.COMISSIONADO_ID === c.ID)||{}).VALOR), 0)))
+    }
+  };
+}
+
+function exportarComissoes(){
+  const d = dadosComissoes();
+  if (!d.recs.length) return toast('Nada para exportar neste filtro.','erro');
+  baixarExcel('comissoes', d.cab, d.linhas, 'Comissões');
+}
+
+function imprimirComissoes(){
+  const d = dadosComissoes();
+  if (!d.recs.length) return toast('Nada para imprimir neste filtro.','erro');
+  const numerica = i => i >= 4 && i < 7 + d.coms.length + 1;   // valores e comissões
+  const corpo = '<table class="impTab"><thead><tr>'
+    + d.cab.map((c,i) => '<th'+(numerica(i) ? ' class="num"' : '')+'>'+esc(c)+'</th>').join('')
+    + '</tr></thead><tbody>'
+    + d.linhas.map(l => '<tr>' + l.map((v,i) =>
+        '<td'+(numerica(i) ? ' class="num"' : '')+'>'
+        + esc(typeof v === 'number' ? nMoeda(v) : v) + '</td>').join('') + '</tr>').join('')
+    + '</tbody><tfoot><tr><th colspan="4">Totais — ' + d.recs.length + ' recebimento(s)</th>'
+    + '<th class="num">'+nMoeda(d.totais.caiu)+'</th>'
+    + '<th class="num">'+nMoeda(d.totais.esc)+'</th>'
+    + '<th class="num">'+nMoeda(d.totais.base)+'</th>'
+    + d.totais.porCom.map(v => '<th class="num">'+nMoeda(v)+'</th>').join('')
+    + '<th class="num">'+nMoeda(rd(d.totais.porCom.reduce((a,b) => a + b, 0)))+'</th><th></th>'
+    + '</tr></tfoot></table>';
+  imprimirRelatorio('Comissões', d.recs.length + ' recebimento(s)'
+    + (d.filtros ? ' · ' + d.filtros : ' · todo o período'), corpo);
+}
+
+function telaComissoes(){
+  const mes = FILTROS.fMesC || '', t = FILTROS.busca;
+  const dc = dadosComissoes();
+  const coms = dc.coms, recs = dc.recs;
+  const todas = (DB.COMISSOES||[]).filter(c => !mes || mesDe(c.DATA) === mes);
 
   const porCom = {};
   todas.forEach(c => { porCom[c.COMISSIONADO_ID] = porCom[c.COMISSIONADO_ID] || {t:0, ab:0};
@@ -6222,6 +6288,8 @@ function telaComissoes(){
   return cabec('Comissões', 'Base de cálculo: a parte do escritório sem a tarifa bancária.',
       '<button class="btn sec" onclick="abrirConfig(\'regras\')">Comissionados e regras</button>'
     + '<button class="btn sec" onclick="verificarComissoes()">Atualizar pelas regras</button>'
+    + '<button class="btn sec" onclick="imprimirComissoes()">Imprimir / PDF</button>'
+    + '<button class="btn sec" onclick="exportarComissoes()">Exportar Excel</button>'
     + (aPagar.length ? '<button class="btn" onclick="gerarCPComissoes()">Enviar '+aPagar.length+' para contas a pagar</button>' : ''))
     + avisoComissoesPendentes()
     + '<div class="kpis">'
