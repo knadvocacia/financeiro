@@ -314,7 +314,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.3';
+const VERSAO_APP = 'v10.4';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -1661,6 +1661,10 @@ function pracasDaRegra(r){
   return String((r && r.PRACAS) || '').split('|').map(s => s.trim()).filter(Boolean);
 }
 /* percentual da regra: usa o próprio da EXEC quando o lançamento foi calculado por ela */
+/* "Acordo CPC" e "Acordo Cpc" são a mesma categoria: comparar byte a byte
+   fazia a regra não pegar e a comissão sumir sem aviso. */
+const mesmaCategoria = (a, b) => !!a && !!b && chaveCat(a) === chaveCat(b);
+
 function pctDaRegra(r, usouExec){
   const alt = n(r && r.PCT_EXEC);
   return (usouExec && alt > 0) ? alt : n(r && r.PCT);
@@ -3403,7 +3407,7 @@ function loteParcela(m, p, valor){
           +' · '+memoriaValores(valor, baseCom, tarifa, sucP) })});
   }
   (DB.REGRAS_COMISSAO||[])
-    .filter(r => r.SUBCLASSE && r.SUBCLASSE === l.SUBCLASSE)
+    .filter(r => mesmaCategoria(r.SUBCLASSE, l.SUBCLASSE))
     .filter(r => regraCobrePraca(r, l.PRACA))
     .forEach(r => {
       const base = n(r.PCT_BASE) > 0 ? rd(valor * n(r.PCT_BASE) / 100) : baseCom;
@@ -3442,7 +3446,7 @@ function comissoesDoRecebimento(cr, valor, data){
   const baseCom = rd((n(cr.VALOR_ESCRITORIO) || 0) - n(cr.TARIFA));
   if (baseCom <= 0) return [];
   return (DB.REGRAS_COMISSAO||[])
-    .filter(r => r.SUBCLASSE && r.SUBCLASSE === cr.CATEGORIA)
+    .filter(r => mesmaCategoria(r.SUBCLASSE, cr.CATEGORIA))
     .filter(r => regraCobrePraca(r, cr.PRACA))
     .map(r => {
       const base = n(r.PCT_BASE) > 0 ? rd(n(valor) * n(r.PCT_BASE) / 100) : baseCom;
@@ -6177,7 +6181,7 @@ function telaComissoes(){
     const esc2 = n(c.VALOR_ESCRITORIO) || n(c.VALOR);
     recs.push({p:null, l:{}, data:c.DATA_RECEB, cliente:c.CLIENTE || c.DESCRICAO || '—',
       pasta:c.PASTA || '—', sub:(c.CATEGORIA||'—') + (c.EXEC === 'SIM' ? ' · EXEC' : ''),
-      caiu:n(c.VALOR), esc:esc2, base:rd(esc2 - n(c.TARIFA)),
+      caiu:n(c.VALOR), esc:esc2, base:rd(esc2 - n(c.TARIFA)), praca:c.PRACA,
       itens:(DB.COMISSOES||[]).filter(x => x.PARCELA_ID === c.ID)});
   });
   recs = recs.filter(r => !mes || mesDe(r.data) === mes)
@@ -6198,8 +6202,12 @@ function telaComissoes(){
     + '<td>'+esc(r.sub)+'</td><td class="num">'+nMoeda(r.caiu)+'</td><td class="num">'+nMoeda(r.esc)+'</td>'
     + '<td class="num">'+nMoeda(r.base)+'</td>'
     + coms.map(c => { const it = r.itens.find(x => x.COMISSIONADO_ID === c.ID);
-        return '<td class="num">' + (it ? nMoeda(it.VALOR) + '<div class="mini">' + nMoeda(it.PCT) + '% de ' + moeda(it.BASE)
-          + (it.STATUS === 'Paga' ? ' · paga' : '') + '</div>' : '<span class="mini">—</span>') + '</td>'; }).join('')
+        if (it) return '<td class="num">' + nMoeda(it.VALOR) + '<div class="mini">' + nMoeda(it.PCT) + '% de '
+          + moeda(it.BASE) + (it.STATUS === 'Paga' ? ' · paga' : '') + '</div></td>';
+        const m2 = motivoSemComissao(r, c.ID);
+        return '<td class="num">' + (m2
+          ? '<span class="tag t-pend" title="'+esc(m2.ajuda)+'">'+esc(m2.curto)+'</span>'
+          : '<span class="mini">—</span>') + '</td>'; }).join('')
     + '</tr>').join('')
     : '<tr><td colspan="'+(6+coms.length)+'">'+vazio('Sem comissões no período','As comissões são geradas na conciliação, conforme as regras por categoria.')+'</td></tr>';
 
@@ -7704,6 +7712,28 @@ async function aplicarRateio(cliDe, cliPara){
   }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
 }
 
+/* Por que esta linha não tem comissão deste advogado. Antes aparecia só um
+   traço, igual para causas muito diferentes — e aí não dava para saber se
+   faltava regra, se a praça barrou ou se não havia base. */
+function motivoSemComissao(r, comissionadoId){
+  const cat = r.p ? (r.l||{}).SUBCLASSE : String(r.sub||'').split(' · ')[0];
+  const praca = r.p ? (r.l||{}).PRACA : r.praca;
+  const daCat = (DB.REGRAS_COMISSAO||[])
+    .filter(x => mesmaCategoria(x.SUBCLASSE, cat) && x.COMISSIONADO_ID === comissionadoId);
+  if (!daCat.length) return null;                       // sem regra: o traço basta
+  if (!daCat.some(x => regraCobrePraca(x, praca)))
+    return {curto:'fora da praça',
+            ajuda:'Há regra desta categoria para este comissionado, mas ela vale só para outras praças. '
+                + 'Corrija a praça do lançamento ou tire a restrição da regra.'};
+  if (rd(n(r.base)) <= 0)
+    return {curto:'sem base',
+            ajuda:'O crédito foi todo para o cliente e ao escritório sobrou no máximo a tarifa bancária, '
+                + 'que é reembolso e não entra na base. Sem valor do escritório não há comissão a calcular.'};
+  return {curto:'a gerar',
+          ajuda:'A regra se aplica e há base, mas a comissão ainda não foi gerada — ela nasce na conciliação. '
+              + 'Use "Atualizar pelas regras" para criá-la.'};
+}
+
 /* A comissão nasce na conciliação: regra criada ou alterada depois não alcança
    o que já foi recebido. Este aviso põe isso na cara, com o botão ao lado. */
 function avisoComissoesPendentes(){
@@ -7730,12 +7760,12 @@ function avisoComissoesPendentes(){
    a comissão incide sobre o dinheiro que de fato entrou.
    Comissão já enviada para contas a pagar ou já paga nunca é tocada. */
 function planoComissoes(){
-  const criar = [], alterar = [], travadas = [], semRegra = [], foraPraca = [];
+  const criar = [], alterar = [], travadas = [], semRegra = [], foraPraca = [], semBase = [];
 
   const avaliar = ref => {
     const existentes = (DB.COMISSOES||[]).filter(x => x.PARCELA_ID === ref.refId);
     const daCategoria = (DB.REGRAS_COMISSAO||[])
-      .filter(r => r.SUBCLASSE && r.SUBCLASSE === ref.sub);
+      .filter(r => mesmaCategoria(r.SUBCLASSE, ref.sub));
     const regras = daCategoria.filter(r => regraCobrePraca(r, ref.praca));
 
     // Há regra para a categoria, mas nenhuma cobre a praça do lançamento. Sem
@@ -7749,7 +7779,14 @@ function planoComissoes(){
       const base = n(r.PCT_BASE) > 0 ? rd(ref.valor * n(r.PCT_BASE) / 100) : ref.baseCom;
       const pct = pctDaRegra(r, ref.exec);
       const v = rd(base * pct / 100);
-      if (v <= 0) return;
+      if (v <= 0){
+        // a regra existe e cobre a praça, mas o recebimento não deixou valor
+        // para o escritório — não há sobre o que calcular
+        if (!existentes.some(x => x.COMISSIONADO_ID === r.COMISSIONADO_ID))
+          semBase.push({quem:ref.quem, oque:ref.oque, data:ref.data,
+            adv:nomeComissionado(r.COMISSIONADO_ID), caiu:ref.valor, base:base});
+        return;
+      }
       const ja = existentes.find(x => x.COMISSIONADO_ID === r.COMISSIONADO_ID);
       const comum = {quem:ref.quem, oque:ref.oque, data:ref.data,
                      adv:nomeComissionado(r.COMISSIONADO_ID), pct, base, valor:v};
@@ -7801,7 +7838,7 @@ function planoComissoes(){
   const porData = (a,b) => String(a.data||'').localeCompare(String(b.data||''));
   return {criar:criar.sort(porData), alterar:alterar.sort(porData),
           travadas:travadas.sort(porData), semRegra:semRegra.sort(porData),
-          foraPraca:foraPraca.sort(porData)};
+          foraPraca:foraPraca.sort(porData), semBase:semBase.sort(porData)};
 }
 
 /* Quantas comissões as regras de hoje determinam e ainda não existem.
@@ -7812,7 +7849,7 @@ function pendenciasComissoes(){
   return memo('comPend', () => {
     const p = planoComissoes();
     return {criar:p.criar.length, alterar:p.alterar.length, foraPraca:p.foraPraca.length,
-            total:p.criar.length + p.alterar.length};
+            semBase:p.semBase.length, total:p.criar.length + p.alterar.length};
   });
 }
 
@@ -7834,6 +7871,8 @@ function verificarComissoes(){
     + kpi('Sem regra hoje', p.semRegra.length, 'mantidas como estão', p.semRegra.length ? 'n' : '')
     + kpi('Barradas pela praça', p.foraPraca.length, 'regra existe, praça não bate',
           p.foraPraca.length ? 'n' : '')
+    + kpi('Sem base de cálculo', p.semBase.length, 'nada ficou para o escritório',
+          p.semBase.length ? 'd' : '')
     + '</div>'
     + (nada
       ? vazio('Nada a atualizar', 'Todo recebimento já tem a comissão que as regras de hoje determinam.')
@@ -7861,6 +7900,12 @@ function verificarComissoes(){
         i => '<tr><td>'+dataBR(i.data)+'<div class="mini">'+esc(i.oque)+'</div></td>'
           + '<td>'+esc(i.quem)+'</td><td>'+esc(i.adv)+'</td>'
           + '<td class="num">'+nMoeda(i.de)+'</td></tr>')
+    + tabela('Sem base de cálculo — nada ficou para o escritório', p.semBase,
+        [{t:'Recebimento'},{t:'Pasta / cliente'},{t:'Advogado'},{t:'Caiu na conta',num:1},{t:'Base',num:1}],
+        i => '<tr><td>'+dataBR(i.data)+'<div class="mini">'+esc(i.oque)+'</div></td>'
+          + '<td>'+esc(i.quem)+'</td><td>'+esc(i.adv)+'</td>'
+          + '<td class="num">'+nMoeda(i.caiu)+'</td>'
+          + '<td class="num">'+nMoeda(i.base)+'</td></tr>')
     + tabela('A regra existe, mas a praça não bate', p.foraPraca,
         [{t:'Recebimento'},{t:'Pasta / cliente'},{t:'Advogado'},{t:'Categoria'},
          {t:'Praça do lançamento'},{t:'Praças da regra'}],
@@ -7868,6 +7913,13 @@ function verificarComissoes(){
           + '<td>'+esc(i.quem)+'</td><td>'+esc(i.adv)+'</td><td>'+esc(i.cat)+'</td>'
           + '<td><span class="tag t-pend">'+esc(i.praca)+'</span></td>'
           + '<td>'+esc(i.pracas)+'</td></tr>')
+    + (p.semBase.length
+        ? '<p class="mini" style="margin-top:10px">Nos recebimentos sem base, o valor do crédito foi todo para o '
+          + 'cliente e ao escritório sobrou no máximo a tarifa bancária, que é reembolso e não entra na base. '
+          + 'Sem valor do escritório não há comissão a calcular — é o resultado correto, não uma falha. '
+          + 'Se o escritório deveria ter ficado com parte dessa parcela, corrija o valor dela na pasta e '
+          + 'rode esta atualização de novo.</p>'
+        : '')
     + (p.foraPraca.length
         ? '<p class="mini" style="margin-top:10px;color:var(--brass)">Os recebimentos acima têm regra cadastrada '
           + 'para a categoria, mas a regra vale só para certas praças e a praça do lançamento não está entre elas '
