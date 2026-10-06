@@ -247,6 +247,30 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
   .net span{display:none}
   .net{padding:6px}
 }
+
+/* ── Impressão ───────────────────────────────────────────────────────────
+   A área de impressão fica fora da tela e só aparece ao imprimir, quando
+   todo o resto some. O navegador oferece "Salvar como PDF" no mesmo lugar. */
+#areaImpressao{display:none}
+@media print{
+  @page{size:A4 landscape;margin:12mm}
+  body{background:#fff}
+  body *{visibility:hidden}
+  #areaImpressao, #areaImpressao *{visibility:visible}
+  #areaImpressao{display:block;position:absolute;left:0;top:0;width:100%;color:#000}
+  #areaImpressao .cabImp{border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:10px}
+  #areaImpressao .cabImp h1{font-size:16px;margin:0;font-weight:700}
+  #areaImpressao .cabImp .sub{font-size:10px;color:#444;margin-top:2px}
+  #areaImpressao table.impTab{width:100%;border-collapse:collapse;font-size:9.5px}
+  #areaImpressao table.impTab th,
+  #areaImpressao table.impTab td{border:1px solid #999;padding:3px 5px;text-align:left;
+    vertical-align:top;word-break:break-word}
+  #areaImpressao table.impTab thead th{background:#eee;font-weight:700}
+  #areaImpressao table.impTab thead{display:table-header-group}
+  #areaImpressao table.impTab tfoot th{background:#eee;font-weight:700}
+  #areaImpressao table.impTab tr{page-break-inside:avoid}
+  #areaImpressao table.impTab .num{text-align:right;white-space:nowrap}
+}
 </style>
 </head>
 <body>
@@ -283,13 +307,14 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
 <div class="overlay" id="ov"><div class="modal" id="mod"></div></div>
 <div id="toast"></div>
 <div id="carregando"><div style="text-align:center"><div class="spin"></div><span id="msgCarregando">Carregando…</span></div></div>
+<div id="areaImpressao"></div>
 
 <script>
 /* ══════════════════════════════════════════════════════════
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.1';
+const VERSAO_APP = 'v10.3';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -3149,11 +3174,61 @@ function mostrarTodosPendentes(total){
       + 'Cada movimento pesquisa os registros em aberto, então a tela pode demorar alguns segundos para desenhar.')) return;
   setF('pendVis', total);
 }
+/* Os depósitos não identificados já filtrados, com tudo o que o movimento tem.
+   Uma só fonte para a tela, a planilha e a impressão: o que você vê é o que sai. */
+function dadosNaoIdentificados(L){
+  const F = (L || (DB.EXTRATO||[]).filter(m => m.STATUS === 'Nao identificado'))
+    .filter(m => entreDatas(m.DATA, FILTROS.niDe, FILTROS.niAte))
+    .filter(m => contem(m.IDENTIFICACAO + ' ' + (m.OBS||''), FILTROS.niBusca))
+    .filter(m => entreValores(Math.abs(n(m.VALOR)), FILTROS.niMin, FILTROS.niMax))
+    .sort((a,b) => String(a.DATA).localeCompare(String(b.DATA)));
+  const filtros = [];
+  if (FILTROS.niDe || FILTROS.niAte)
+    filtros.push('crédito de ' + (FILTROS.niDe ? dataBR(FILTROS.niDe) : 'início')
+                 + ' a ' + (FILTROS.niAte ? dataBR(FILTROS.niAte) : 'hoje'));
+  if (FILTROS.niBusca) filtros.push('busca "' + FILTROS.niBusca + '"');
+  if (FILTROS.niMin || FILTROS.niMax)
+    filtros.push('valor de ' + (FILTROS.niMin ? moeda(FILTROS.niMin) : '—')
+                 + ' a ' + (FILTROS.niMax ? moeda(FILTROS.niMax) : '—'));
+  return {
+    movs: F,
+    filtros: filtros.join(' · '),
+    cab: ['Data','Histórico','Tipo','Valor','Conta','Observação','Importado em','Arquivo de origem'],
+    linhas: F.map(m => [dataBR(m.DATA), m.IDENTIFICACAO || '', ehDebito(m) ? 'Débito' : 'Crédito',
+                        rd(Math.abs(n(m.VALOR))), m.BANCO || '', m.OBS || '',
+                        m.IMPORTADO_EM || '', m.ARQUIVO || '']),
+    totCred: rd(F.filter(m => !ehDebito(m)).reduce((t,m) => t + Math.abs(n(m.VALOR)), 0)),
+    totDeb: rd(F.filter(ehDebito).reduce((t,m) => t + Math.abs(n(m.VALOR)), 0))
+  };
+}
+
+function exportarNaoIdentificados(){
+  const d = dadosNaoIdentificados();
+  if (!d.movs.length) return toast('Nada para exportar neste filtro.','erro');
+  baixarExcel('depositos-nao-identificados', d.cab, d.linhas, 'Não identificados');
+}
+
+function imprimirNaoIdentificados(){
+  const d = dadosNaoIdentificados();
+  if (!d.movs.length) return toast('Nada para imprimir neste filtro.','erro');
+  const corpo = '<table class="impTab"><thead><tr>'
+    + d.cab.map((c,i) => '<th'+(i === 3 ? ' class="num"' : '')+'>'+esc(c)+'</th>').join('')
+    + '</tr></thead><tbody>'
+    + d.linhas.map(l => '<tr>' + l.map((v,i) =>
+        '<td'+(i === 3 ? ' class="num"' : '')+'>'
+        + esc(i === 3 ? nMoeda(v) : v) + '</td>').join('') + '</tr>').join('')
+    + '</tbody><tfoot><tr><th colspan="3">Créditos sem origem — ' + d.movs.filter(m => !ehDebito(m)).length + '</th>'
+    + '<th class="num">' + nMoeda(d.totCred) + '</th><th colspan="4"></th></tr>'
+    + (d.totDeb ? '<tr><th colspan="3">Débitos sem origem — ' + d.movs.filter(ehDebito).length + '</th>'
+        + '<th class="num">' + nMoeda(d.totDeb) + '</th><th colspan="4"></th></tr>' : '')
+    + '</tfoot></table>';
+  imprimirRelatorio('Depósitos não identificados',
+    d.movs.length + ' movimento(s)' + (d.filtros ? ' · ' + d.filtros : ''), corpo);
+}
+
 function listaNaoIdentificados(L){
   if (!L.length) return '<div class="card">'+vazio('Nenhum movimento não identificado','Depósitos sem origem aparecem aqui com sugestões de pastas de mesmo valor.')+'</div>';
-  const F = L.filter(m => entreDatas(m.DATA, FILTROS.niDe, FILTROS.niAte))
-             .filter(m => contem(m.IDENTIFICACAO + ' ' + (m.OBS||''), FILTROS.niBusca))
-             .filter(m => entreValores(Math.abs(n(m.VALOR)), FILTROS.niMin, FILTROS.niMax));
+  const F = dadosNaoIdentificados(L).movs;
   const creditos = F.filter(m => !ehDebito(m));
   const somaCred = rd(creditos.reduce((s,m) => s + Math.abs(n(m.VALOR)), 0));
   const somaDeb = rd(F.filter(ehDebito).reduce((s,m) => s + Math.abs(n(m.VALOR)), 0));
@@ -3174,7 +3249,13 @@ function listaNaoIdentificados(L){
     + campoTexto('niBusca','Histórico ou observação','buscar…')
     + campoValor('niMin','Valor de') + campoValor('niMax','Valor até')
     + botaoLimpar(['niDe','niAte','niBusca','niMin','niMax'])
-    + '</div>';
+    + '<div class="campo" style="min-width:0"><label>&nbsp;</label>'
+    + '<button class="btn sec" onclick="imprimirNaoIdentificados()">Imprimir / PDF</button></div>'
+    + '<div class="campo" style="min-width:0"><label>&nbsp;</label>'
+    + '<button class="btn sec" onclick="exportarNaoIdentificados()">Exportar Excel</button></div>'
+    + '</div>'
+    + '<p class="mini" style="margin:-4px 0 12px">O relatório sai exatamente com o que está filtrado aqui, '
+    + 'com histórico, valor, conta, observação, data da importação e arquivo de origem.</p>';
 
   if (!F.length) return topo + '<div class="card">'
     + vazio('Nada neste filtro','Ajuste as datas, o valor ou a busca.')+'</div>';
@@ -6134,6 +6215,7 @@ function telaComissoes(){
       '<button class="btn sec" onclick="abrirConfig(\'regras\')">Comissionados e regras</button>'
     + '<button class="btn sec" onclick="verificarComissoes()">Atualizar pelas regras</button>'
     + (aPagar.length ? '<button class="btn" onclick="gerarCPComissoes()">Enviar '+aPagar.length+' para contas a pagar</button>' : ''))
+    + avisoComissoesPendentes()
     + '<div class="kpis">'
     + coms.slice(0,4).map(c => kpi(c.NOME, moeda((porCom[c.ID]||{}).t || 0), moeda((porCom[c.ID]||{}).ab || 0) + ' em aberto', 'b')).join('')
     + '</div>'
@@ -6864,11 +6946,48 @@ function exportarCSV(qual){
     });
     Object.keys(M).sort().forEach(m => linhas.push([mesBR(m), nMoeda(M[m][0]), nMoeda(M[m][1]), nMoeda(M[m][2])]));
   }
+  baixarCSV(qual, cab, linhas);
+}
+
+/* ── Download de arquivos ───────────────────────────────────────────────── */
+function baixarCSV(nome, cab, linhas){
   const csv = [cab].concat(linhas).map(l => l.map(c => '"'+String(c==null?'':c).replace(/"/g,'""')+'"').join(';')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'}));
-  a.download = qual + '-' + hoje() + '.csv'; a.click(); URL.revokeObjectURL(a.href);
+  a.download = nome + '-' + hoje() + '.csv'; a.click(); URL.revokeObjectURL(a.href);
   toast('Arquivo gerado.','ok');
+}
+
+/* Planilha de verdade, com os valores como número para somar no Excel.
+   A biblioteca já está carregada para importar extratos; sem ela, cai no CSV,
+   que o Excel abre do mesmo jeito. */
+function baixarExcel(nome, cab, linhas, aba){
+  if (typeof XLSX === 'undefined' || !XLSX.utils || !XLSX.writeFile)
+    return baixarCSV(nome, cab, linhas);
+  try{
+    const ws = XLSX.utils.aoa_to_sheet([cab].concat(linhas));
+    ws['!cols'] = cab.map((c,i) => {
+      const larg = linhas.reduce((m,l) => Math.max(m, String(l[i] == null ? '' : l[i]).length),
+                                 String(c).length);
+      return {wch: Math.min(60, Math.max(10, larg + 2))};
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, (aba || 'Relatório').slice(0,31));
+    XLSX.writeFile(wb, nome + '-' + hoje() + '.xlsx');
+    toast('Planilha gerada.','ok');
+  }catch(e){ baixarCSV(nome, cab, linhas); }
+}
+
+/* Impressão: monta o relatório numa área própria e manda imprimir. O navegador
+   oferece "Salvar como PDF" na mesma janela, então serve para os dois. */
+function imprimirRelatorio(titulo, subtitulo, html){
+  const box = document.getElementById('areaImpressao');
+  if (!box) return toast('Não foi possível montar a impressão.','erro');
+  box.innerHTML = '<div class="cabImp"><h1>' + esc(titulo) + '</h1>'
+    + '<div class="sub">' + esc(cfg('NOME_ESCRITORIO','Escritório de advocacia'))
+    + ' · emitido em ' + dataBR(hoje()) + (subtitulo ? ' · ' + esc(subtitulo) : '') + '</div></div>'
+    + html;
+  window.print();
 }
 
 /* ══════════════════ INÍCIO ══════════════════ */
@@ -7585,6 +7704,23 @@ async function aplicarRateio(cliDe, cliPara){
   }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
 }
 
+/* A comissão nasce na conciliação: regra criada ou alterada depois não alcança
+   o que já foi recebido. Este aviso põe isso na cara, com o botão ao lado. */
+function avisoComissoesPendentes(){
+  const p = pendenciasComissoes();
+  if (!p.total && !p.foraPraca) return '';
+  const partes = [];
+  if (p.criar) partes.push('<b>' + p.criar + '</b> recebimento(s) sem a comissão que as regras determinam');
+  if (p.alterar) partes.push('<b>' + p.alterar + '</b> com valor diferente do que a regra diz hoje');
+  if (p.foraPraca) partes.push('<b>' + p.foraPraca + '</b> com regra barrada pela praça');
+  return '<div class="card" style="border-left:3px solid var(--brass)"><div class="corpo">'
+    + '<p class="mini" style="margin:0">' + partes.join(' · ') + '. '
+    + 'A comissão é gerada na conciliação do crédito, então uma regra criada ou alterada depois não alcança '
+    + 'sozinha o que já foi recebido. '
+    + '<button class="btn sm" style="margin-left:6px" onclick="verificarComissoes()">Ver e atualizar</button>'
+    + '</p></div></div>';
+}
+
 /* ══ Reaplicar as regras de comissão no que já foi recebido ═══════════════
    A comissão nasce na conciliação, a partir das regras daquele momento. Se a
    regra não existia (ou não cobria a praça) quando o crédito entrou, a parcela
@@ -7594,13 +7730,20 @@ async function aplicarRateio(cliDe, cliPara){
    a comissão incide sobre o dinheiro que de fato entrou.
    Comissão já enviada para contas a pagar ou já paga nunca é tocada. */
 function planoComissoes(){
-  const criar = [], alterar = [], travadas = [], semRegra = [];
+  const criar = [], alterar = [], travadas = [], semRegra = [], foraPraca = [];
 
   const avaliar = ref => {
     const existentes = (DB.COMISSOES||[]).filter(x => x.PARCELA_ID === ref.refId);
-    const regras = (DB.REGRAS_COMISSAO||[])
-      .filter(r => r.SUBCLASSE && r.SUBCLASSE === ref.sub)
-      .filter(r => regraCobrePraca(r, ref.praca));
+    const daCategoria = (DB.REGRAS_COMISSAO||[])
+      .filter(r => r.SUBCLASSE && r.SUBCLASSE === ref.sub);
+    const regras = daCategoria.filter(r => regraCobrePraca(r, ref.praca));
+
+    // Há regra para a categoria, mas nenhuma cobre a praça do lançamento. Sem
+    // avisar, isso vira uma comissão que simplesmente nunca aparece.
+    if (daCategoria.length && !regras.length)
+      daCategoria.forEach(r => foraPraca.push({quem:ref.quem, oque:ref.oque, data:ref.data,
+        adv:nomeComissionado(r.COMISSIONADO_ID), cat:ref.sub,
+        praca:ref.praca || '(sem praça)', pracas:pracasDaRegra(r).join(', ')}));
 
     regras.forEach(r => {
       const base = n(r.PCT_BASE) > 0 ? rd(ref.valor * n(r.PCT_BASE) / 100) : ref.baseCom;
@@ -7657,7 +7800,20 @@ function planoComissoes(){
 
   const porData = (a,b) => String(a.data||'').localeCompare(String(b.data||''));
   return {criar:criar.sort(porData), alterar:alterar.sort(porData),
-          travadas:travadas.sort(porData), semRegra:semRegra.sort(porData)};
+          travadas:travadas.sort(porData), semRegra:semRegra.sort(porData),
+          foraPraca:foraPraca.sort(porData)};
+}
+
+/* Quantas comissões as regras de hoje determinam e ainda não existem.
+   Fica no alto da tela de Comissões: a comissão nasce na conciliação, então
+   uma regra criada ou mudada depois não alcança o que já foi recebido, e sem
+   este aviso isso passa despercebido. */
+function pendenciasComissoes(){
+  return memo('comPend', () => {
+    const p = planoComissoes();
+    return {criar:p.criar.length, alterar:p.alterar.length, foraPraca:p.foraPraca.length,
+            total:p.criar.length + p.alterar.length};
+  });
 }
 
 function verificarComissoes(){
@@ -7676,6 +7832,8 @@ function verificarComissoes(){
     + kpi('Valores a corrigir', p.alterar.length, moeda(soma(p.alterar)), p.alterar.length ? 'b' : '')
     + kpi('Intocáveis', p.travadas.length, 'já pagas ou enviadas', p.travadas.length ? 'd' : '')
     + kpi('Sem regra hoje', p.semRegra.length, 'mantidas como estão', p.semRegra.length ? 'n' : '')
+    + kpi('Barradas pela praça', p.foraPraca.length, 'regra existe, praça não bate',
+          p.foraPraca.length ? 'n' : '')
     + '</div>'
     + (nada
       ? vazio('Nada a atualizar', 'Todo recebimento já tem a comissão que as regras de hoje determinam.')
@@ -7703,6 +7861,19 @@ function verificarComissoes(){
         i => '<tr><td>'+dataBR(i.data)+'<div class="mini">'+esc(i.oque)+'</div></td>'
           + '<td>'+esc(i.quem)+'</td><td>'+esc(i.adv)+'</td>'
           + '<td class="num">'+nMoeda(i.de)+'</td></tr>')
+    + tabela('A regra existe, mas a praça não bate', p.foraPraca,
+        [{t:'Recebimento'},{t:'Pasta / cliente'},{t:'Advogado'},{t:'Categoria'},
+         {t:'Praça do lançamento'},{t:'Praças da regra'}],
+        i => '<tr><td>'+dataBR(i.data)+'<div class="mini">'+esc(i.oque)+'</div></td>'
+          + '<td>'+esc(i.quem)+'</td><td>'+esc(i.adv)+'</td><td>'+esc(i.cat)+'</td>'
+          + '<td><span class="tag t-pend">'+esc(i.praca)+'</span></td>'
+          + '<td>'+esc(i.pracas)+'</td></tr>')
+    + (p.foraPraca.length
+        ? '<p class="mini" style="margin-top:10px;color:var(--brass)">Os recebimentos acima têm regra cadastrada '
+          + 'para a categoria, mas a regra vale só para certas praças e a praça do lançamento não está entre elas '
+          + '— por isso nunca geraram comissão. Corrija a praça do lançamento ou tire a restrição da regra, '
+          + 'em Configurações → Comissionados e regras, e rode esta atualização de novo.</p>'
+        : '')
     + '<p class="mini" style="margin-top:12px">A base é o valor que ficou para o escritório no recebimento, '
     + 'sem a tarifa — ou o percentual do crédito, quando a regra usa essa base. Vale o valor congelado na '
     + 'conciliação, não o rateio de hoje: a comissão incide sobre o dinheiro que entrou de fato. '
