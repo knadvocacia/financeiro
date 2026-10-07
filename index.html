@@ -114,6 +114,12 @@ main{margin:56px 0 0 var(--rail);padding:22px 24px 60px}
 
 /* ── TABELAS ── */
 .tw{overflow-x:auto}
+/* Cabeçalho fixo: o th já é sticky, mas sem limite de altura o container nunca
+   rola por dentro — quem rola é a página, e aí o sticky não tem onde grudar.
+   Com max-height a tabela rola dentro do quadro e a barra superior fica. */
+.tw.fixa{max-height:72vh;overflow:auto}
+.tw.fixa thead th{position:sticky;top:0;z-index:3}
+.tw.fixa tfoot th{position:sticky;bottom:0;z-index:3;background:var(--surface2)}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;font-weight:600;font-size:11px;letter-spacing:.04em;color:var(--ink2);padding:8px 10px;border-bottom:1px solid var(--line);background:var(--surface2);white-space:nowrap;position:sticky;top:0}
 td{padding:8px 10px;border-bottom:1px solid var(--line2);vertical-align:top}
@@ -314,7 +320,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.6';
+const VERSAO_APP = 'v10.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -6257,7 +6263,12 @@ function dadosComissoes(){
       esc: rd(recs.reduce((t2,r) => t2 + n(r.esc), 0)),
       base: rd(recs.reduce((t2,r) => t2 + n(r.base), 0)),
       porCom: coms.map(c => rd(recs.reduce((t2,r) =>
-        t2 + n((r.itens.find(x => x.COMISSIONADO_ID === c.ID)||{}).VALOR), 0)))
+        t2 + n((r.itens.find(x => x.COMISSIONADO_ID === c.ID)||{}).VALOR), 0))),
+      // o que ainda não foi pago, do mesmo conjunto filtrado
+      porComAberto: coms.map(c => rd(recs.reduce((t2,r) => {
+        const it = r.itens.find(x => x.COMISSIONADO_ID === c.ID);
+        return t2 + (it && it.STATUS !== 'Paga' ? n(it.VALOR) : 0);
+      }, 0)))
     }
   };
 }
@@ -6295,10 +6306,6 @@ function telaComissoes(){
   const coms = dc.coms, recs = dc.recs;
   const todas = (DB.COMISSOES||[]).filter(c => !mes || mesDe(c.DATA) === mes);
 
-  const porCom = {};
-  todas.forEach(c => { porCom[c.COMISSIONADO_ID] = porCom[c.COMISSIONADO_ID] || {t:0, ab:0};
-    porCom[c.COMISSIONADO_ID].t += n(c.VALOR);
-    if (c.STATUS !== 'Paga') porCom[c.COMISSIONADO_ID].ab += n(c.VALOR); });
 
   const cabecalho = '<tr><th>Crédito</th><th>Pasta / cliente</th><th>Categoria</th>'
     + '<th class="num">Caiu na conta</th><th class="num">Para o escritório</th><th class="num">Base padrão</th>'
@@ -6325,26 +6332,40 @@ function telaComissoes(){
     + coms.map(c => '<th class="num">'+nMoeda(recs.reduce((s,r)=>s+n((r.itens.find(x=>x.COMISSIONADO_ID===c.ID)||{}).VALOR),0))+'</th>').join('')
     + '</tr></tfoot>' : '';
 
-  const aPagar = todas.filter(c => c.STATUS !== 'Paga');
+  // o mesmo critério de gerarCPComissoes: contar diferente do que a ação faz
+  // dava um botão que prometia um número e executava outro
+  const aEnviar = (DB.COMISSOES||[]).filter(c => c.STATUS !== 'Paga' && !c.CP_ID);
+  const foraDoFiltro = mes ? aEnviar.filter(c => mesDe(c.DATA) !== mes).length : 0;
   return cabec('Comissões', 'Base de cálculo: a parte do escritório sem a tarifa bancária.',
       '<button class="btn sec" onclick="abrirConfig(\'regras\')">Comissionados e regras</button>'
     + '<button class="btn sec" onclick="verificarComissoes()">Atualizar pelas regras</button>'
     + '<button class="btn sec" onclick="imprimirComissoes()">Imprimir / PDF</button>'
     + '<button class="btn sec" onclick="exportarComissoes()">Exportar Excel</button>'
-    + (aPagar.length ? '<button class="btn" onclick="gerarCPComissoes()">Enviar '+aPagar.length+' para contas a pagar</button>' : ''))
+    + (aEnviar.length ? '<button class="btn" onclick="gerarCPComissoes()" title="'
+        + (foraDoFiltro ? foraDoFiltro + ' delas são de outros meses — o envio não respeita o filtro de mês'
+                        : 'todas as comissões pendentes de envio')
+        + '">Enviar '+aEnviar.length+' para contas a pagar</button>' : ''))
     + avisoComissoesPendentes()
     + '<div class="kpis">'
-    + coms.slice(0,4).map(c => kpi(c.NOME, moeda((porCom[c.ID]||{}).t || 0), moeda((porCom[c.ID]||{}).ab || 0) + ' em aberto', 'b')).join('')
+    + kpi('Total das comissões', moeda(rd(dc.totais.porCom.reduce((a,b) => a + b, 0))),
+          (mes ? mesBR(mes) : 'todo o período')
+          + (t ? ' · busca: ' + t : '') + ' · ' + recs.length + ' recebimento(s)', 'p')
+    + coms.map((c,i) => kpi(c.NOME, moeda(dc.totais.porCom[i]),
+          moeda(dc.totais.porComAberto[i]) + ' em aberto', 'b')).join('')
     + '</div>'
     + '<div class="filtros">' + campoBusca('Cliente, pasta, subclasse…') + selMes('fMesC', mes) + '</div>'
     + (coms.length
-      ? '<div class="card"><div class="tw"><table><thead>'+cabecalho+'</thead><tbody>'+linhas+'</tbody>'+rodape+'</table></div></div>'
+      ? '<div class="card"><div class="tw fixa"><table><thead>'+cabecalho+'</thead><tbody>'+linhas+'</tbody>'+rodape+'</table></div></div>'
       : '<div class="card">'+vazio('Nenhum comissionado cadastrado','Cadastre os comissionados e as regras por categoria na engrenagem, em Regras de comissão.')+'</div>');
 }
 async function gerarCPComissoes(){
   const pend = (DB.COMISSOES||[]).filter(c => c.STATUS !== 'Paga' && !c.CP_ID);
   if (!pend.length) return toast('Nenhuma comissão pendente de envio.','erro');
-  if (!confirm('Gerar '+pend.length+' conta(s) a pagar de comissão?')) return;
+  const mesF = FILTROS.fMesC || '';
+  const fora = mesF ? pend.filter(c => mesDe(c.DATA) !== mesF).length : 0;
+  if (!confirm('Gerar ' + pend.length + ' conta(s) a pagar de comissão?'
+    + (fora ? '\n\nAtenção: ' + fora + ' delas são de outros meses. O envio pega todas as comissões '
+            + 'pendentes, não só as do mês filtrado na tela.' : ''))) return;
   const lote = [];
   pend.forEach(c => {
     const cpId = uid('cp');
