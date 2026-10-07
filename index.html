@@ -314,7 +314,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.5';
+const VERSAO_APP = 'v10.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -387,7 +387,19 @@ function tit(txt){
     return min.charAt(0).toLocaleUpperCase('pt-BR') + min.slice(1);
   }).join(' ');
 }
-const mesDe = iso => String(iso||'').slice(0,7);
+/* O mês de uma data, seja como ela estiver gravada. Cortar os 7 primeiros
+   caracteres só funcionava com aaaa-mm-dd: uma data digitada à mão na planilha,
+   sem o zero no mês ou em dd/mm/aaaa, não casava com a opção do filtro — e o
+   filtro de mês vinha vazio enquanto "Todos" mostrava tudo. */
+const mesDe = d => {
+  const s = String(d == null ? '' : d).trim();
+  if (!s) return '';
+  let m = s.match(/^(\d{4})[-\/.](\d{1,2})/);            // 2026-09-05, 2026-9-5, 2026/09/05
+  if (m) return m[1] + '-' + ('0' + m[2]).slice(-2);
+  m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})/);  // 05/09/2026
+  if (m) return m[3] + '-' + ('0' + m[2]).slice(-2);
+  return s.slice(0,7);
+};
 function mesBR(ym){
   if (!ym) return '—';
   const M = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
@@ -884,7 +896,9 @@ function casaValor(valor, termo){
 function selMes(id, valor){
   const meses = new Set();
   (DB.PARCELAS||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); if (p.DATA_CREDITO) meses.add(mesDe(p.DATA_CREDITO)); });
-  (DB.CONTAS_PAGAR||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); });
+  (DB.CONTAS_PAGAR||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); if (p.DATA_PGTO) meses.add(mesDe(p.DATA_PGTO)); });
+  // recebimentos avulsos também aparecem nas telas filtradas por mês
+  (DB.CONTAS_RECEBER||[]).forEach(c => { if (c.VENCIMENTO) meses.add(mesDe(c.VENCIMENTO)); if (c.DATA_RECEB) meses.add(mesDe(c.DATA_RECEB)); });
   meses.add(mesDe(hoje()));
   return '<div class="campo"><label>Mês</label><select id="'+id+'" onchange="setF(\''+id+'\',this.value)"><option value="">Todos</option>'
     + [...meses].filter(Boolean).sort().reverse().map(m => '<option value="'+m+'"'+(valor===m?' selected':'')+'>'+mesBR(m)+'</option>').join('') + '</select></div>';
@@ -6162,6 +6176,33 @@ function ajustarComissoes(refId, baseAntiga, baseNova){
 }
 /* Sem baixa manual: um pagamento só se efetiva conciliando o débito no extrato bancário. */
 /* ══════════════════ COMISSÕES ══════════════════ */
+/* Os meses que de fato têm crédito conciliado. O seletor de mês lista também
+   meses de vencimento, então dá para escolher um mês sem recebimento nenhum —
+   e aí a tela vazia parecia defeito. */
+/* mensagem da tela sem linhas: quando o mês escolhido não tem crédito, diz
+   quais meses têm, em vez de deixar o usuário no vazio */
+function vazioComissoes(mes){
+  const ms = mesesComRecebimento();
+  if (mes && ms.length && ms.indexOf(mes) < 0)
+    return vazio('Nenhum crédito conciliado em ' + mesBR(mes),
+      'O filtro é pela data do crédito, não pelo vencimento. Há recebimentos em: '
+      + ms.slice(0,8).map(mesBR).join(' · ') + '.');
+  if (mes && !ms.length)
+    return vazio('Nenhum crédito conciliado ainda',
+      'As comissões nascem na conciliação do crédito no extrato.');
+  return vazio('Sem comissões no período',
+    'As comissões são geradas na conciliação, conforme as regras por categoria.');
+}
+
+function mesesComRecebimento(){
+  const s = new Set();
+  (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida')
+    .forEach(p => { const m = mesDe(p.DATA_CREDITO); if (m) s.add(m); });
+  (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido')
+    .forEach(c => { const m = mesDe(c.DATA_RECEB); if (m) s.add(m); });
+  return [...s].sort().reverse();
+}
+
 /* Os recebimentos da tela de Comissões, já filtrados. Uma só fonte para a
    tela, a planilha e a impressão: o relatório sai com o que está na frente. */
 function dadosComissoes(){
@@ -6275,7 +6316,7 @@ function telaComissoes(){
           ? '<span class="tag t-pend" title="'+esc(m2.ajuda)+'">'+esc(m2.curto)+'</span>'
           : '<span class="mini">—</span>') + '</td>'; }).join('')
     + '</tr>').join('')
-    : '<tr><td colspan="'+(6+coms.length)+'">'+vazio('Sem comissões no período','As comissões são geradas na conciliação, conforme as regras por categoria.')+'</td></tr>';
+    : '<tr><td colspan="'+(6+coms.length)+'">'+vazioComissoes(mes)+'</td></tr>';
 
   const rodape = recs.length ? '<tfoot><tr><th colspan="3" style="text-align:right">Totais</th>'
     + '<th class="num">'+nMoeda(recs.reduce((s,r)=>s+r.caiu,0))+'</th>'
