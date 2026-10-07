@@ -320,7 +320,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.7';
+const VERSAO_APP = 'v10.8';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -7056,11 +7056,8 @@ function exportarCSV(qual){
       .forEach(c => linhas.push([dataBR(c.DATA_PGTO), dataBR(c.VENCIMENTO), c.DESCRICAO,
         c.FAVORECIDO, c.CATEGORIA, nMoeda(c.VALOR), c.ORIGEM]));
   } else if (qual === 'resumo'){
-    cab = ['Pendência','Data','Quem','Descrição','Valor','Dias em atraso'];
-    resumoItens().forEach(it => it.linhas.forEach(r =>
-      linhas.push([it.titulo, dataBR(r.quando), r.quem, r.oque,
-                   r.semBoleto ? 'boleto nao recebido' : nMoeda(r.valor),
-                   vencido(r.ord) ? Math.round(diasEntre(r.ord, hoje())) : ''])));
+    const tr = tabelaResumo();
+    cab = tr.cab; linhas = tr.linhas;
   } else if (qual === 'totais'){
     cab = ['Bloco','Indicador','Valor','Detalhe'];
     resumoBlocos().forEach(b => b.itens.forEach(i =>
@@ -7561,25 +7558,29 @@ function resumoItens(){
 
   /* 1 — depósitos sem origem definida */
   const naoId = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Nao identificado' && !ehDebito(m))
-    .map(m => ({ord:m.DATA, acao:'mov', id:m.ID, quando:m.DATA,
+    // depósito não identificado não tem excluir: tirar um movimento do extrato
+    // aqui apagaria o próprio extrato do banco
+    .map(m => ({ord:m.DATA, acao:'mov', id:m.ID, del:null, quando:m.DATA,
                 quem:m.BANCO || '—', oque:m.IDENTIFICACAO || 'depósito sem identificação',
                 valor:Math.abs(n(m.VALOR))}))
     .sort(antesPrimeiro);
 
   /* 2 — repasses marcados como sem dados bancários do cliente */
   const semDados = contasSemDados()
-    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, quando:c.VENCIMENTO,
+    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, del:{tipo:'cp', id:c.ID}, quando:c.VENCIMENTO,
                 quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—', valor:n(c.VALOR)}))
     .sort(antesPrimeiro);
 
   /* 3 — contas a receber vencidas e ainda não recebidas */
   const receber = pendentesReceber().filter(p => vencido(p.VENCIMENTO)).map(p => {
     const l = lancDe(p.LANC_ID);
-    return {ord:p.VENCIMENTO, acao:'parc', id:p.LANC_ID, quando:p.VENCIMENTO,
+    return {ord:p.VENCIMENTO, acao:'parc', id:p.LANC_ID, del:{tipo:'receber', id:p.ID},
+            quando:p.VENCIMENTO,
             quem:(l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—'),
             oque:p.TIPO + (n(p.NUM) > 0 ? ' ' + n(p.NUM) : ''), valor:n(p.VALOR)};
   }).concat((DB.CONTAS_RECEBER||[]).filter(c => c.STATUS !== 'Recebido' && vencido(c.VENCIMENTO))
-    .map(c => ({ord:c.VENCIMENTO, acao:'cr', id:c.ID, quando:c.VENCIMENTO,
+    .map(c => ({ord:c.VENCIMENTO, acao:'cr', id:c.ID, del:{tipo:'receber', id:c.ID},
+                quando:c.VENCIMENTO,
                 quem:(c.PASTA ? c.PASTA + ' · ' : '') + (c.CLIENTE || '—'),
                 oque:c.DESCRICAO || '—', valor:n(c.VALOR)})))
     .sort(antesPrimeiro);
@@ -7589,7 +7590,7 @@ function resumoItens(){
     .filter(c => c.STATUS !== 'Pago' && c.CATEGORIA !== 'Repasse a cliente')
     .filter(c => !cpEmExecucao(c) && !cpAguardando(c) && !cpAguardandoGuia(c))
     .filter(c => vencido(c.VENCIMENTO))
-    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, quando:c.VENCIMENTO,
+    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, del:{tipo:'cp', id:c.ID}, quando:c.VENCIMENTO,
                 quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—',
                 valor:n(c.VALOR), semBoleto:semValorCP(c)}))
     .sort(antesPrimeiro);
@@ -7599,7 +7600,7 @@ function resumoItens(){
   const repasses = (DB.CONTAS_PAGAR||[])
     .filter(c => c.CATEGORIA === 'Repasse a cliente' && !repasseNaoDevido(c))
     .filter(c => vencido(c.VENCIMENTO))
-    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, quando:c.VENCIMENTO,
+    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, del:{tipo:'cp', id:c.ID}, quando:c.VENCIMENTO,
                 quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—', valor:n(c.VALOR)}))
     .sort(antesPrimeiro);
 
@@ -7640,6 +7641,16 @@ function abrirDoResumo(acao, id){
   if (acao === 'mov') return escolherManual(id);
   toast('Registro não encontrado — ele pode ter sido excluído.','erro');
 }
+const ROTULO_ABRIR = {cp:'Editar', cr:'Editar', parc:'Ver pasta', mov:'Vincular'};
+
+/* apaga pelo mesmo caminho das telas de contas, com as mesmas perguntas:
+   o que fazer com o repasse ao cliente e o retorno dos movimentos à conciliação */
+function apagarDoResumo(tipo, id){
+  fecharModal();
+  if (tipo === 'cp') return apagarSimples('CONTAS_PAGAR', id);
+  if (tipo === 'receber') return excluirReceber([id]);
+  toast('Este registro não pode ser excluído por aqui.','erro');
+}
 
 /* a relação de um cartão do resumo */
 function detalheResumo(chave){
@@ -7660,12 +7671,60 @@ function detalheResumo(chave){
         + '<td>'+esc(r.quem)+'</td>'
         + '<td>'+esc(r.oque)+'</td>'
         + '<td class="num">'+(r.semBoleto ? '<span class="mini">boleto não recebido</span>' : nMoeda(r.valor))+'</td>'
-        + '<td style="text-align:right"><button class="btn sm sec" '
-          + 'onclick="abrirDoResumo(\''+r.acao+'\',\''+esc(r.id)+'\')">Abrir</button></td></tr>').join('')
+        + '<td style="text-align:right;white-space:nowrap">'
+          + '<button class="btn sm sec" onclick="abrirDoResumo(\''+r.acao+'\',\''+esc(r.id)+'\')">'
+          + (ROTULO_ABRIR[r.acao] || 'Abrir') + '</button>'
+          + (r.del ? ' <button class="btn sm per" onclick="apagarDoResumo(\''+r.del.tipo+'\',\''
+              + esc(r.del.id)+'\')">Excluir</button>' : '')
+          + '</td></tr>').join('')
       + '</tbody><tfoot><tr class="total"><td colspan="3">Total</td>'
       + '<td class="num">'+nMoeda(rd(L.reduce((s,x) => s + n(x.valor), 0)))+'</td><td></td></tr></tfoot></table></div>'
-      + '<p class="mini" style="margin-top:10px">Clique em <b>Abrir</b> para entrar no lançamento.</p>';
+      + '<p class="mini" style="margin-top:10px">Editar e excluir daqui seguem o mesmo caminho das telas de '
+      + 'contas: a exclusão pergunta o que fazer com o repasse ao cliente e devolve à conciliação os '
+      + 'movimentos que estavam vinculados. Depósito do extrato não tem excluir — ele é o extrato do banco.</p>';
   modal(it.titulo, corpo, '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
+}
+
+/* As linhas do resumo em formato de tabela, para a planilha, o CSV e o papel. */
+function tabelaResumo(){
+  const itens = resumoItens();
+  const linhas = [];
+  itens.forEach(it => it.linhas.forEach(r => linhas.push([
+    it.titulo, dataBR(r.quando), r.quem, r.oque,
+    r.semBoleto ? 0 : rd(n(r.valor)),
+    vencido(r.ord) ? Math.round(diasEntre(r.ord, hoje())) : '',
+    r.semBoleto ? 'boleto não recebido' : ''
+  ])));
+  return {itens, linhas,
+    cab: ['Pendência','Data','Quem','Descrição','Valor','Dias em atraso','Observação']};
+}
+
+function exportarResumo(){
+  const d = tabelaResumo();
+  if (!d.linhas.length) return toast('Nada para exportar — não há pendências.','erro');
+  baixarExcel('resumo-pendencias', d.cab, d.linhas, 'Resumo');
+}
+
+function imprimirResumo(){
+  const d = tabelaResumo();
+  if (!d.linhas.length) return toast('Nada para imprimir — não há pendências.','erro');
+  const total = rd(d.linhas.reduce((t,l) => t + n(l[4]), 0));
+  const resumo = '<table class="impTab" style="margin-bottom:12px"><thead><tr>'
+    + '<th>Pendência</th><th class="num">Quantidade</th><th class="num">Valor</th></tr></thead><tbody>'
+    + d.itens.map(i => '<tr><td>'+esc(i.titulo)+'</td>'
+      + '<td class="num">'+i.linhas.length+'</td>'
+      + '<td class="num">'+esc(i.valor)+'</td></tr>').join('')
+    + '</tbody></table>';
+  const detalhe = '<table class="impTab"><thead><tr>'
+    + d.cab.map((c,i) => '<th'+(i === 4 || i === 5 ? ' class="num"' : '')+'>'+esc(c)+'</th>').join('')
+    + '</tr></thead><tbody>'
+    + d.linhas.map(l => '<tr>' + l.map((v,i) =>
+        '<td'+(i === 4 || i === 5 ? ' class="num"' : '')+'>'
+        + esc(i === 4 ? (n(v) ? nMoeda(v) : '—') : v) + '</td>').join('') + '</tr>').join('')
+    + '</tbody><tfoot><tr><th colspan="4">Total das pendências</th>'
+    + '<th class="num">'+nMoeda(total)+'</th><th colspan="2"></th></tr></tfoot></table>';
+  imprimirRelatorio('Resumo das pendências',
+    d.linhas.length + ' lançamento(s) · ' + moeda(total), resumo + detalhe);
 }
 
 function telaResumo(){
@@ -7675,8 +7734,10 @@ function telaResumo(){
     + '<div class="rot">'+esc(i.titulo)+' <span class="lupa">›</span></div>'
     + '<div class="val">'+esc(i.valor)+'</div><div class="sub">'+esc(i.nota)+'</div></div>';
 
-  return cabec('Resumo', 'O que está pendente de ação. Clique em qualquer valor para ver os lançamentos e entrar neles.',
-      '<button class="btn sec" onclick="exportarCSV(\'resumo\')">Exportar CSV</button>')
+  return cabec('Resumo', 'O que está pendente de ação. Clique em qualquer valor para ver os lançamentos, '
+      + 'editar ou excluir.',
+      '<button class="btn sec" onclick="imprimirResumo()">Imprimir / PDF</button>'
+    + '<button class="btn sec" onclick="exportarResumo()">Exportar Excel</button>')
     + '<div class="kpis">' + itens.map(cartao).join('') + '</div>'
     + '<div class="card"><div class="tw"><table class="densa"><thead><tr>'
     + '<th>Pendência</th><th class="num">Quantidade</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
