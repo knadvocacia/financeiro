@@ -320,7 +320,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v10.9';
+const VERSAO_APP = 'v11.0';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -4391,12 +4391,58 @@ function parseOFX(txt){
    O texto formatado ainda é lido em paralelo, porque em um caso ele diz algo
    que o valor cru perdeu: a escala do percentual. */
 async function tabelaDeExcel(f){
-  const buf = await f.arrayBuffer();
+  // Uint8Array, não ArrayBuffer: é o que type:'array' espera, e era a única
+  // diferença entre o que foi testado aqui e o que rodava no navegador
+  const buf = new Uint8Array(await f.arrayBuffer());
   const wb = XLSX.read(buf, {type:'array', cellDates:true});
   const sh = wb.Sheets[wb.SheetNames[0]];
   const cru = XLSX.utils.sheet_to_json(sh, {header:1, defval:'', raw:true});
   const fmt = XLSX.utils.sheet_to_json(sh, {header:1, defval:'', raw:false});
   return cru.map((linha, i) => (linha||[]).map((v, j) => celulaPlanilha(v, (fmt[i]||[])[j])));
+}
+
+/* O que a planilha realmente entregou nas primeiras linhas. Quando um valor ou
+   uma data sai errado, a causa está aqui — e sem isso a conversa virava
+   suposição sobre o formato da célula. */
+function diagnosticoPlanilha(){
+  if (!IMPCP_CRU.length) return '';
+  const tipo = v => v == null ? 'vazio'
+    : Object.prototype.toString.call(v) === '[object Date]' ? 'data'
+    : typeof v === 'number' ? 'número' : 'texto';
+  return '<details style="margin:10px 0"><summary class="mini" style="cursor:pointer">'
+    + 'O que o sistema leu da planilha — primeiras linhas · versão ' + VERSAO_APP + '</summary>'
+    + '<div class="tw" style="max-height:220px;overflow:auto;margin-top:6px">'
+    + '<table class="densa"><tbody>'
+    + IMPCP_CRU.map((linha,i) => '<tr><td class="mini">' + (i ? 'linha ' + i : 'cabeçalho') + '</td>'
+      + (linha||[]).slice(0,6).map(v => '<td class="mini">' + esc(String(v == null ? '' : v))
+        + '<div style="color:var(--ink2)">' + tipo(v) + '</div></td>').join('')
+      + '</tr>').join('')
+    + '</tbody></table></div>'
+    + '<p class="mini" style="margin-top:6px">Data e número precisam aparecer como <b>data</b> e '
+    + '<b>número</b>. Se aparecerem como <b>texto</b>, a célula está formatada como texto na planilha — '
+    + 'o sistema ainda tenta ler, mas aí o formato importa.</p></details>';
+}
+
+/* Número vindo de planilha, em qualquer convenção. Vale o ÚLTIMO separador
+   como decimal: "4.714,30" e "4,714.30" são os mesmos 4714,30. O n() do sistema
+   assume a convenção brasileira — certo para o que o usuário digita, errado
+   para uma célula formatada em inglês, onde lia 4,71. */
+function numeroPlanilha(v){
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+  let s = String(v == null ? '' : v).replace(/[^\d,.\-]/g, '').trim();
+  if (!s) return 0;
+  const neg = s.indexOf('-') === 0;
+  s = s.replace(/-/g, '');
+  const ult = Math.max(s.lastIndexOf(','), s.lastIndexOf('.'));
+  if (ult > -1){
+    const casas = s.length - ult - 1;
+    const temOutro = s.slice(0, ult).search(/[,.]/) > -1;
+    // 3 casas e nenhum outro separador antes = milhar: "4.714" são 4714
+    if (casas === 3 && !temOutro) s = s.replace(/[,.]/g, '');
+    else s = s.slice(0, ult).replace(/[,.]/g, '') + '.' + s.slice(ult + 1);
+  }
+  const x = parseFloat(s);
+  return isNaN(x) ? 0 : (neg ? -x : x);
 }
 
 function celulaPlanilha(cru, formatado){
@@ -4430,7 +4476,7 @@ function parseTabela(rows){
   for (let r=ini; r<rows.length; r++){
     const row = rows[r] || [];
     const data = isoDe(row[iD]);
-    const valor = n(row[iV]);
+    const valor = numeroPlanilha(row[iV]);
     if (!data || !valor) continue;
     out.push({DATA:data, IDENTIFICACAO:String(iI >= 0 ? (row[iI]||'') : '').trim(), VALOR:rd(valor)});
   }
@@ -4760,14 +4806,16 @@ function mapaColunasCP(rows){
   }
   return null;
 }
+let IMPCP_CRU = [];
 function parseTabelaCP(rows){
+  IMPCP_CRU = (rows||[]).slice(0, 6);     // guardado só para o diagnóstico da tela
   const m = mapaColunasCP(rows);
   if (!m) throw new Error('cabeçalho não reconhecido. Confira se há colunas de vencimento, favorecido, categoria, valor e observações.');
   const pega = (linha, chave) => m.mapa[chave] === undefined ? '' : String(linha[m.mapa[chave]] || '').trim();
   const out = [];
   for (let r = m.inicio; r < rows.length; r++){
     const linha = rows[r] || [];
-    const valor = n(pega(linha, 'valor'));
+    const valor = numeroPlanilha(pega(linha, 'valor'));
     const venc = isoDe(pega(linha, 'venc'));
     const fav = tit(pega(linha, 'fav'));
     if (!valor && !fav) continue;
@@ -4809,7 +4857,9 @@ function previaImportCP(linhas){
           + (IMPCP_NOVAS.cats.length && IMPCP_NOVAS.favs.length ? ' e ' : '')
           + (IMPCP_NOVAS.favs.length ? '<b>'+IMPCP_NOVAS.favs.length+'</b> favorecido(s)' : '') + '.</p>'
         : '')
-    + (semVenc ? '<div class="erro">'+semVenc+' linha(s) sem vencimento reconhecido. Elas entram com a data de hoje — confira o formato da coluna (dd/mm/aaaa).</div>' : '')
+    + (semVenc ? '<div class="erro">'+semVenc+' linha(s) sem vencimento reconhecido. Elas entram com a data de hoje. '
+        + 'Abra <b>O que o sistema leu da planilha</b> abaixo para ver como a data chegou.</div>' : '')
+    + diagnosticoPlanilha()
     + '<div class="tw" style="max-height:280px;overflow:auto"><table class="densa"><thead><tr><th>Vencimento</th>'
     + '<th>Descrição</th><th>Favorecido</th><th>Categoria</th><th class="num">Valor</th><th>Observações</th></tr></thead><tbody>'
     + IMPCP.slice(0,150).map(l => '<tr><td>'+(l.VENCIMENTO ? dataBR(l.VENCIMENTO) : '<span class="tag t-pend">sem data</span>')+'</td>'
@@ -5010,7 +5060,7 @@ function parseTabelaAcordos(rows){
   const out = [];
   for (let r = inicio; r < rows.length; r++){
     const linha = rows[r] || [];
-    const valorTotal = n(pega(linha,'valorTotal'));
+    const valorTotal = numeroPlanilha(pega(linha,'valorTotal'));
     const cliente = pega(linha,'cliente'), pasta = pega(linha,'pasta');
     if (!valorTotal && !cliente && !pasta) continue;
     const pctCli = n(pega(linha,'pctCli')) || pctClientePadrao();
@@ -5020,9 +5070,9 @@ function parseTabelaAcordos(rows){
       audiencia: tit(pega(linha,'audiencia')),
       dataAcordo: isoDe(pega(linha,'dataAcordo')),
       primeiro: isoDe(pega(linha,'primeiro')) || isoDe(pega(linha,'dataAcordo')) || hoje(),
-      valorTotal: rd(valorTotal), sucumbencia: rd(n(pega(linha,'sucumbencia'))),
+      valorTotal: rd(valorTotal), sucumbencia: rd(numeroPlanilha(pega(linha,'sucumbencia'))),
       qtd: Math.max(1, parseInt(n(pega(linha,'qtd'))) || 1),
-      valorParcela: rd(n(pega(linha,'valorParcela'))),
+      valorParcela: rd(numeroPlanilha(pega(linha,'valorParcela'))),
       pctCli, pctEsc: rd(100 - pctCli),
       categoria: tit(pega(linha,'categoria')) || catAcordoPadrao(),
       obs: pega(linha,'obs')
