@@ -320,7 +320,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v11.2';
+const VERSAO_APP = 'v11.3';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -796,7 +796,14 @@ function modal(titulo, corpo, rodape, classe){
     + '<div class="corpo">'+corpo+'</div>' + (rodape ? '<div class="rodape">'+rodape+'</div>' : '');
   $('#ov').classList.add('on');
 }
-function fecharModal(){ $('#ov').classList.remove('on'); }
+/* Quando o editor foi aberto de dentro do vínculo manual, fechá-lo devolve a
+   busca em vez de deixar a tela vazia. O reencaixe é adiado um tique porque o
+   gravar fecha a janela antes de atualizar o DB. */
+let VINC_VOLTA = null;
+function fecharModal(){
+  $('#ov').classList.remove('on');
+  if (VINC_VOLTA){ const v = VINC_VOLTA; VINC_VOLTA = null; setTimeout(() => retomarVinculo(v), 0); }
+}
 /* Clicar fora NÃO fecha a janela: um toque fora do quadro apagava um
    lançamento inteiro pela metade. Só o Cancelar, o × e a tecla Esc fecham. */
 $('#ov').addEventListener('click', e => {
@@ -3893,14 +3900,51 @@ function pintarVinculoUm(movId){
       + '<td>'+dataBR(c.venc)+'</td>'
       + '<td class="num">'+(c.semBoleto ? '<span class="mini">—</span>' : nMoeda(c.valor))
         + (!c.semBoleto && Math.abs(c.valor - alvo) <= 0.01 ? '<div class="mini pos">valor idêntico</div>' : '')+'</td>'
-      + '<td style="text-align:right"><button class="btn sm ok" '
+      + '<td style="text-align:right;white-space:nowrap">'
+        + '<button class="btn sm sec" style="margin-right:6px" title="Corrigir nome, valor, categoria e datas antes de vincular" '
+        + 'onclick="editarAntesDeVincular(\''+movId+'\',\''+c.tipo+'\',\''+c.id+'\')">Editar</button>'
+        + '<button class="btn sm ok" '
         + 'onclick="vincularUm(\''+movId+'\',\''+c.id+'\','+(c.semBoleto ? alvo : c.valor)+','+(c.travado?'1':'0')+')">Vincular</button></td></tr>').join('')
     + '</tbody></table></div>'
     + '<p class="mini" style="margin-top:6px">'
     + (todos.length > L.length ? 'Mostrando 60 de ' + todos.length + ' — refine a busca. ' : '')
+    + 'Em <b>Editar</b> dá para corrigir o registro — nome, valor, categoria, vencimento — e a busca volta '
+    + 'como estava para você vincular em seguida. '
     + (deb ? 'A conta é baixada com o valor e a data do débito.'
            : 'O rateio usa os percentuais do lançamento, mesmo que o crédito seja diferente do valor da parcela.')
     + '</p>';
+}
+
+/* ── Editar um registro antes de vincular ──
+   Abre o editor próprio de cada tipo (a janela do vínculo é uma só, então o
+   editor ocupa o lugar dela) e, ao fechar — salvando ou cancelando —, a busca
+   volta exatamente como estava, já com o registro corrigido na lista. */
+function editarAntesDeVincular(movId, tipo, alvoId){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const volta = {movId, busca: String(val('vmBusca')||'')};
+  if (tipo === 'pagar'){
+    if (!(DB.CONTAS_PAGAR||[]).some(c => c.ID === alvoId))
+      return toast('Conta não encontrada — ela pode ter sido excluída.','erro');
+    VINC_VOLTA = volta; return formCP(alvoId);
+  }
+  if (tipo === 'receber'){
+    if (!(DB.CONTAS_RECEBER||[]).some(c => c.ID === alvoId))
+      return toast('Conta não encontrada — ela pode ter sido excluída.','erro');
+    VINC_VOLTA = volta; return formCR(alvoId);
+  }
+  if (tipo === 'parcela'){
+    const p = (DB.PARCELAS||[]).find(x => x.ID === alvoId);
+    if (!p) return toast('Parcela não encontrada — ela pode ter sido excluída.','erro');
+    VINC_VOLTA = volta; return formLanc(p.LANC_ID);
+  }
+  toast('Este registro não pode ser editado por aqui.','erro');
+}
+/* chamada pelo fecharModal: só reabre se nada mais tomou a janela no caminho */
+function retomarVinculo(v){
+  if (!v || $('#ov').classList.contains('on')) return;
+  escolherManual(v.movId);
+  const e = document.getElementById('vmBusca');
+  if (e){ e.value = v.busca; pintarVinculoUm(v.movId); e.focus(); }
 }
 /* Lança uma conta a pagar (débito) ou um recebimento (crédito) direto na conciliação
    e já concilia o movimento com ele. Em categorias que dividem com o cliente,
