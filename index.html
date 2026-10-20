@@ -125,6 +125,8 @@ th{text-align:left;font-weight:600;font-size:11px;letter-spacing:.04em;color:var
 td{padding:8px 10px;border-bottom:1px solid var(--line2);vertical-align:top}
 tbody tr:hover{background:var(--surface2)}
 tr.grifo{background:var(--brass-l)}
+/* total no pé da lista: soma do que o filtro deixou na tela */
+tfoot tr.totGeral th{background:var(--surface2);border-top:2px solid var(--ink);font-size:13.5px;padding:10px}
 .kpi.abrir:hover{border-color:var(--brand);background:var(--brand-l)}
 td.abrir{cursor:pointer}
 tr:hover td.abrir{color:var(--brand-d)}
@@ -320,7 +322,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v11.3';
+const VERSAO_APP = 'v11.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -905,6 +907,20 @@ function botaoLimpar(ids){
     + '<button class="btn sec" onclick="limparFiltros([\''+ids.join("','")+'\'])">Limpar</button></div>';
 }
 function limparFiltros(ids){ ids.forEach(k => delete FILTROS[k]); render(); }
+/* ── Total no pé das listas ──
+   Sempre a soma do que está na tela, nunca do banco inteiro: filtrou, o total
+   acompanha. Um helper só para as cinco telas não divergirem entre si.
+   antes  = quantas colunas o rótulo ocupa; valores = uma coluna numérica cada;
+   depois = colunas vazias que sobram à direita. */
+function rodapeTotal(qtd, rotulo, antes, valores, depois){
+  if (!qtd) return '';
+  return '<tfoot><tr class="totGeral"><th colspan="'+antes+'" style="text-align:right">'
+    + esc(rotulo) + ' — ' + qtd + ' lançamento' + (qtd > 1 ? 's' : '') + '</th>'
+    + (valores||[]).map(v => '<th class="num">'+nMoeda(rd(n(v)))+'</th>').join('')
+    + (depois ? '<th colspan="'+depois+'"></th>' : '')
+    + '</tr></tfoot>';
+}
+const somaCampo = (L, campo) => rd((L||[]).reduce((s,r) => s + n(r[campo]), 0));
 const entreDatas = (d, de, ate) => (!de || String(d||'') >= de) && (!ate || String(d||'') <= ate);
 const entreValores = (v, min, max) => (!min || n(v) >= n(min)) && (!max || n(v) <= n(max));
 const contem = (txt, termo) => !termo || String(txt||'').toLowerCase().includes(String(termo).toLowerCase());
@@ -1505,6 +1521,17 @@ const catsParticular = () => String(cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR
   .split(/[,;|]/).map(chaveCat).filter(Boolean);
 const ehCatParticular = nome => catsParticular().indexOf(chaveCat(nome)) > -1;
 
+/* ── Categorias que não se dividem com o cliente ───────────────────────────
+   Sucumbência é honorário do escritório: o valor não é do cliente, então não
+   há rateio nem repasse. Ao escolher a categoria no lançamento, o rateio vai
+   para 0% cliente / 100% escritório, os dois campos travam e a tarifa sai —
+   não há parte do cliente de onde descontá-la. Lista editável em
+   Configurações → Geral; a comparação ignora acento, maiúscula e ponto. */
+const CATS_ESCRITORIO_PADRAO = 'Sucumbência';
+const catsEscritorio = () => String(cfg('CATEGORIAS_ESCRITORIO', CATS_ESCRITORIO_PADRAO))
+  .split(/[,;|]/).map(chaveCat).filter(Boolean);
+const ehCatEscritorio = nome => catsEscritorio().indexOf(chaveCat(nome)) > -1;
+
 const grupoDaCat = nome => {
   const c = (DB.SUBCLASSES||[]).find(x => x.NOME === nome);
   const g = c && String(c.GRUPO||'').trim();
@@ -1790,6 +1817,7 @@ function cfgGeral(){
     + inp('cgFolha','Categorias tratadas como folha no painel', cfg('CATEGORIAS_FOLHA','Folha, Audiencistas'), 'full')
     + inp('cgParticular','Categorias do DRE particular', cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO), 'full')
     + inp('cgParcValor','Categorias com valor por parcela', cfg('CATEGORIAS_PARC_VALOR', CATS_PARC_VALOR_PADRAO), 'full')
+    + inp('cgSoEsc','Categorias 100% do escritório (sem rateio com o cliente)', cfg('CATEGORIAS_ESCRITORIO', CATS_ESCRITORIO_PADRAO), 'full')
     + inp('cgPadTarifa','Termos que indicam tarifa no extrato', cfg('PADROES_TARIFA', PADROES_TARIFA_PADRAO), 'full')
     + inp('cgCatTarifa','Categoria das tarifas bancárias', cfg('CATEGORIA_TARIFA', CAT_TARIFA_PADRAO))
     + inp('cgPctNI','% dos depósitos não identificados no resultado real', cfg('PCT_NAO_IDENT','30'))
@@ -1957,6 +1985,7 @@ async function gravarGeral(){
                     {aba:'CONFIG', registro:{...c, VALOR:val('cgFolha')}},
                     {aba:'CONFIG', registro:{...acha('CATEGORIAS_PARTICULAR'), VALOR:val('cgParticular')}},
                     {aba:'CONFIG', registro:{...acha('CATEGORIAS_PARC_VALOR'), VALOR:val('cgParcValor')}},
+                    {aba:'CONFIG', registro:{...acha('CATEGORIAS_ESCRITORIO'), VALOR:val('cgSoEsc')}},
                     {aba:'CONFIG', registro:{...acha('PADROES_TARIFA'), VALOR:val('cgPadTarifa')}},
                     {aba:'CONFIG', registro:{...acha('CATEGORIA_TARIFA'), VALOR:val('cgCatTarifa')}},
                     {aba:'CONFIG', registro:{...d, VALOR:val('cgPctNI')}},
@@ -2031,7 +2060,10 @@ function telaLancamentos(){
     + (comData ? '<th>Data do acordo</th>' : '')
     + '<th>Pasta / cliente</th><th>Processo / praça</th><th>Categoria</th>'
     + '<th class="num">Valor total</th><th class="num">Sucumbência</th><th class="num">Rateio</th><th>Recebido</th><th></th></tr></thead>'
-    + '<tbody>'+linhas+'</tbody></table></div></div>';
+    + '<tbody>'+linhas+'</tbody>'
+    + rodapeTotal(L.length, 'Total dos acordos', comData ? 4 : 3,
+        [somaCampo(L,'VALOR_TOTAL'), somaCampo(L,'SUCUMBENCIA')], 3)
+    + '</table></div></div>';
 }
 
 /* ── Formulário de lançamento ── */
@@ -2078,6 +2110,7 @@ function formLanc(id){
     + inp('lcPctCli','% do cliente', l.PCT_CLIENTE || pctClientePadrao(), '', 'number', 'step="0.01" oninput="espelhaPct(1)"')
     + inp('lcPctEsc','% do escritório', l.PCT_ESCRITORIO || rd(100 - pctClientePadrao()), '', 'number', 'step="0.01" oninput="espelhaPct(2)"')
     + inp('lcSuc','Honorários de sucumbência (R$)', l.SUCUMBENCIA ? nMoeda(l.SUCUMBENCIA) : '', '', 'text', 'oninput="recalcParcelas()"')
+    + '<div class="campo full" id="avisoSoEsc" style="padding:0;margin:0"></div>'
     + '<div class="check"><input type="checkbox" id="lcTarifa"'+(l.TARIFA_ATIVA!=='NAO'?' checked':'')+'><label for="lcTarifa">Deduzir tarifa bancária da parte do cliente</label></div>'
     + inp('lcTarifaV','Valor da tarifa por parcela (R$)', l.TARIFA_VALOR ? nMoeda(l.TARIFA_VALOR) : nMoeda(tarifaPadrao()))
     + '<p class="mini full" style="margin:-4px 0 2px">A tarifa é descontada da parte do cliente em cada parcela e passa para o escritório. Ela não entra na base de cálculo das comissões.</p>'
@@ -2318,8 +2351,31 @@ function removerParcelaValor(i){
   const q = document.getElementById('lcQtd'); if (q) q.value = Math.max(1, PARC_TMP.length);
   pintarParcelas();
 }
+/* Categoria 100% do escritório: força 0/100, trava os percentuais e desliga a
+   tarifa. Roda em todo redesenho das parcelas, então vale igual no lançamento
+   novo, na edição e no acordo lançado pela conciliação. */
+function aplicarRateioEscritorio(){
+  const soEsc = ehCatEscritorio(val('lcSub'));
+  const cli = document.getElementById('lcPctCli'), esce = document.getElementById('lcPctEsc');
+  const tar = document.getElementById('lcTarifa'), aviso = document.getElementById('avisoSoEsc');
+  if (cli && esce){
+    if (soEsc){ cli.value = '0'; esce.value = '100'; }
+    // ao sair da categoria, os percentuais destravam no padrão do escritório
+    else if (cli.disabled){ cli.value = String(pctClientePadrao()); esce.value = String(rd(100 - pctClientePadrao())); }
+    cli.disabled = soEsc; esce.disabled = soEsc;
+  }
+  if (tar && soEsc){ tar.checked = false; tar.disabled = true; }
+  else if (tar && tar.disabled){ tar.disabled = false; tar.checked = true; }
+  if (aviso) aviso.innerHTML = soEsc
+    ? '<p class="mini" style="color:var(--brass);margin:0"><b>'+esc(val('lcSub'))+'</b> é honorário do escritório: '
+      + 'o valor vai <b>100% para o escritório</b>, sem rateio e sem repasse ao cliente. '
+      + 'A tarifa bancária fica desligada porque não há parte do cliente de onde descontá-la.</p>'
+    : '';
+  return soEsc;
+}
 function pintarParcelas(){
   const box = document.getElementById('boxParcelas'); if (!box) return;
+  aplicarRateioEscritorio();
   if (catParcelaValor(val('lcSub'))) return pintarCPC(box);
   if (!PARC_TMP.length){ box.innerHTML = '<p class="mini">Informe o valor total e a quantidade de parcelas.</p>'; return; }
   const soma = PARC_TMP.reduce((s,p) => s + n(p.VALOR), 0);
@@ -2471,7 +2527,10 @@ async function gravarLanc(id, opcoes){
     }
     if (!op.semFechar){
       fecharModal(); render();
-      toast('Lançamento salvo. O repasse ao cliente já está em contas a pagar, bloqueado até a conciliação.','ok');
+      const repasses = lote.filter(x => x.aba === 'CONTAS_PAGAR').length;
+      toast(repasses
+        ? 'Lançamento salvo. O repasse ao cliente já está em contas a pagar, bloqueado até a conciliação.'
+        : 'Lançamento salvo. Sem repasse ao cliente: o valor é 100% do escritório.','ok');
     }
     return lanc;
   }catch(e){ toast(e.message,'erro'); return null; }
@@ -2494,7 +2553,8 @@ function verParcelas(id){
     + ps.map(p => '<tr><td>'+(p.TIPO==='Sucumbência'?'—':esc(p.NUM))+'</td><td>'+esc(p.TIPO)+'</td><td>'+dataBR(p.VENCIMENTO)+'</td>'
       + '<td class="num">'+nMoeda(p.VALOR)+'</td>'
       + '<td><span class="tag '+(p.STATUS==='Recebida'?'t-ok':'t-pend')+'">'+esc(p.STATUS)+'</span></td>'
-      + '<td>'+dataBR(p.DATA_CREDITO)+'</td><td class="num">'+(p.VALOR_CLIENTE?nMoeda(p.VALOR_CLIENTE):'—')+'</td>'
+      + '<td>'+dataBR(p.DATA_CREDITO)+seloVariosMovs(p.MOV_ID)+'</td>'
+      + '<td class="num">'+(p.VALOR_CLIENTE?nMoeda(p.VALOR_CLIENTE):'—')+'</td>'
       + '<td class="num">'+(p.VALOR_ESCRITORIO?nMoeda(p.VALOR_ESCRITORIO):'—')+'</td></tr>').join('')
     + '</tbody></table></div>',
     '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
@@ -3106,7 +3166,12 @@ function boxSugestoes(mov, ignorarData, vazioTxt){
       : '')
     + '<p class="mini">'
     + esc(vazioTxt || (deb ? 'Nenhuma conta a pagar em aberto compatível com este débito.'
-                           : 'Sem correspondência em contas a receber.')) + '</p>';
+                           : 'Sem correspondência em contas a receber.'))
+    // é exatamente aqui que a soma de vários movimentos resolve: nenhum crédito
+    // sozinho bate com o registro, mas juntos fecham
+    + (vazioTxt ? '' : '<br>Se este ' + (deb ? 'débito' : 'crédito') + ' é só uma parte de um registro maior, '
+        + 'use <b>' + (deb ? 'Juntar débitos' : 'Juntar créditos') + '</b> para somar os movimentos.')
+    + '</p>';
   const abertas = SUG_ABERTAS.has(mov.ID);
   const mostra = abertas ? sg : sg.slice(0, 3);
   return mostra.map(x => {
@@ -3208,7 +3273,11 @@ function ladoMovimento(m, extras){
     + (ehTarifaBanco(m)
         ? '<button class="btn sm ok" onclick="lancarTarifa(\''+m.ID+'\')">Lançar tarifa</button>' : '')
     + '<button class="btn sm sec" onclick="escolherManual(\''+m.ID+'\')">Vincular</button>'
-    + '<button class="btn sm sec" onclick="formVincularVarios(\''+m.ID+'\')">Vincular vários</button>'
+    + '<button class="btn sm sec" title="Um movimento para vários registros do sistema" '
+      + 'onclick="formVincularVarios(\''+m.ID+'\')">Vincular vários</button>'
+    + '<button class="btn sm sec" title="Somar vários movimentos do extrato em um só registro do sistema" '
+      + 'onclick="formJuntarCreditos(\''+m.ID+'\')">'
+      + (ehDebito(m) ? 'Juntar débitos' : 'Juntar créditos') + '</button>'
     + '<button class="btn sm sec" onclick="formNovoNaConciliacao(\''+m.ID+'\')">'
       + (ehDebito(m) ? 'Nova conta' : 'Novo recebimento') + '</button>'
     + (extras || '<button class="btn sm sec" onclick="marcarNaoIdentificado(\''+m.ID+'\')">Não identificado</button>')
@@ -3335,6 +3404,11 @@ function alvoUnico(id){
   return {tipo:'', id, quem:'<span class="mini">—</span>', resumo:'—', cli:0, esc:0};
 }
 const idsDoMov = m => String((m && m.PARCELA_ID) || '').split('|').filter(Boolean);
+/* quantos movimentos do extrato o registro guarda em MOV_ID (1 no caso normal,
+   mais de um quando a baixa veio da soma de vários créditos) */
+const qtdMovs = v => String(v == null ? '' : v).split('|').filter(Boolean).length;
+const seloVariosMovs = v => qtdMovs(v) > 1
+  ? '<div class="mini"><span class="tag t-neutro">' + qtdMovs(v) + ' créditos somados</span></div>' : '';
 function alvosDe(m){ return idsDoMov(m).map(alvoUnico); }
 function alvoDe(mov){
   const L = alvosDe(mov);
@@ -3638,6 +3712,209 @@ function marcarVinculo(movId, id, marcado, aberto){
   }
   pintarVinculos(movId);
 }
+/* ══ Vários movimentos do extrato para UM registro ══════════════════════════
+   O oposto do "Vincular vários": um acordo de 6.600 pago em três PIX chega
+   como três créditos, e nenhum deles bate com a parcela. Aqui se escolhe o
+   registro e se marcam os créditos que, somados, o quitam.
+
+   Não precisou de coluna nova: cada movimento guarda o registro em PARCELA_ID,
+   como sempre, e vários movimentos podem apontar para o mesmo registro. O
+   registro guarda em MOV_ID os ids dos movimentos separados por "|". Toda a
+   baixa — rateio, repasse, comissões, memória de cálculo — passa pelo mesmo
+   loteDoAlvo de sempre, com um movimento sintético que soma os créditos e
+   carrega a data do último (é quando o dinheiro ficou completo). */
+let JUNT = {alvo:'', movs:[]};
+
+function formJuntarCreditos(movId){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const deb = ehDebito(m);
+  JUNT = {alvo:'', movs:[movId]};
+  FILTROS.juntBusca = '';
+  modal((deb ? 'Juntar débitos' : 'Juntar créditos') + ' em um registro',
+    '<p class="mini" style="margin-bottom:12px">A partir do movimento de <b>'+moeda(m.VALOR)+'</b> em '
+    + dataBR(m.DATA) + (m.BANCO ? ' · '+esc(m.BANCO) : '') + ' — '+esc(m.IDENTIFICACAO||'')+'.<br>'
+    + 'Escolha o registro e marque os outros ' + (deb ? 'débitos' : 'créditos')
+    + ' que, somados, o quitam.</p>'
+    + '<div class="campo" style="margin-bottom:12px"><label for="juntBusca">Registro de destino</label>'
+    + '<input id="juntBusca" autocomplete="off" placeholder="cliente, pasta, favorecido, processo ou valor" '
+    + 'oninput="buscaJuntar(\'' + movId + '\', this.value)"></div>'
+    + '<div id="boxJuntar"></div>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn ok" onclick="confirmarJuntar(\'' + movId + '\')">Conciliar</button>', 'larga');
+  pintarJuntar(movId);
+  const e = document.getElementById('juntBusca'); if (e) e.focus();
+}
+function buscaJuntar(movId, texto){ FILTROS.juntBusca = texto; pintarJuntar(movId); }
+function escolherAlvoJuntar(movId, id){
+  JUNT.alvo = (JUNT.alvo === id) ? '' : id;
+  pintarJuntar(movId);
+}
+function marcarMovJuntar(movId, id, marcado){
+  if (id === movId) return;                      // o movimento de origem fica sempre
+  JUNT.movs = marcado ? [...new Set(JUNT.movs.concat([id]))]
+                      : JUNT.movs.filter(x => x !== id);
+  pintarJuntar(movId);
+}
+/* movimentos que podem entrar na soma: do mesmo sinal, ainda não conciliados */
+function movsJuntaveis(m){
+  const deb = ehDebito(m);
+  return (DB.EXTRATO||[])
+    .filter(x => x.STATUS === 'Pendente' || x.STATUS === 'Nao identificado' || x.ID === m.ID)
+    .filter(x => x.STATUS !== 'Conciliado')
+    .filter(x => ehDebito(x) === deb)
+    .sort((a,b) => String(a.DATA).localeCompare(String(b.DATA)));
+}
+const somaJuntar = () => rd(JUNT.movs.reduce((s,id) => {
+  const x = (DB.EXTRATO||[]).find(y => y.ID === id);
+  return s + (x ? Math.abs(n(x.VALOR)) : 0);
+}, 0));
+
+function pintarJuntar(movId){
+  const box = document.getElementById('boxJuntar'); if (!box) return;
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const deb = ehDebito(m);
+  const termo = String(FILTROS.juntBusca || '').trim().toLowerCase();
+  const casaTermo = c => !termo
+    || [c.titulo, c.detalhe, c.sub, c.pasta, c.proc, c.nome].join(' ').toLowerCase().includes(termo)
+    || casaValor(c.valor, termo);
+  const cands = (deb ? candidatosDebitoTodos() : candidatosCredito())
+    .filter(c => JUNT.alvo ? c.id === JUNT.alvo : casaTermo(c))
+    .sort((a,b) => String(a.venc).localeCompare(String(b.venc)))
+    .slice(0, 40);
+  const alvo = JUNT.alvo ? cands.find(c => c.id === JUNT.alvo) : null;
+  const soma = somaJuntar();
+  const falta = alvo ? rd(rd(alvo.valor) - soma) : 0;
+
+  const tabelaAlvo = !cands.length
+    ? vazio('Nada encontrado', 'Tente outro nome, a pasta, o processo ou o valor.')
+    : '<div class="tw" style="max-height:200px;overflow:auto"><table class="densa">'
+      + '<thead><tr><th style="width:34px"></th><th>Registro</th><th>Vencimento</th>'
+      + '<th class="num">Em aberto</th></tr></thead><tbody>'
+      + cands.map(c => '<tr'+(JUNT.alvo === c.id ? ' class="sel"' : '')+'>'
+        + '<td><input type="radio" name="juntAlvo" '+(JUNT.alvo === c.id ? 'checked' : '')
+          + ' style="width:16px;height:16px;accent-color:var(--brand)"'
+          + ' onchange="escolherAlvoJuntar(\''+movId+'\',\''+c.id+'\')"></td>'
+        + '<td><b>'+esc(c.titulo)+'</b><div class="mini">'+esc(c.sub + (c.detalhe ? ' · ' + c.detalhe : ''))+'</div>'
+          + (c.travado ? '<div class="mini"><span class="tag t-ni">✕ crédito do cliente ainda não conciliado</span></div>' : '')
+          + (c.semBoleto ? '<div class="mini"><span class="tag t-pend">sem boleto — usa a soma dos movimentos</span></div>' : '')+'</td>'
+        + '<td>'+dataBR(c.venc)+'</td>'
+        + '<td class="num">'+(c.semBoleto ? '<span class="mini">—</span>' : nMoeda(c.valor))+'</td></tr>').join('')
+      + '</tbody></table></div>'
+      + (JUNT.alvo ? '<p class="mini" style="margin-top:6px"><button class="btn sm sec" '
+          + 'onclick="escolherAlvoJuntar(\''+movId+'\',\''+JUNT.alvo+'\')">Trocar de registro</button></p>' : '');
+
+  const movs = movsJuntaveis(m);
+  const tabelaMovs = '<div class="secao-form">' + (deb ? 'Débitos' : 'Créditos') + ' do extrato a somar</div>'
+    + '<div class="tw" style="max-height:240px;overflow:auto"><table class="densa">'
+    + '<thead><tr><th style="width:34px"></th><th>Data</th><th>Histórico</th><th>Conta</th>'
+    + '<th class="num">Valor</th></tr></thead><tbody>'
+    + movs.map(x => {
+        const marcado = JUNT.movs.indexOf(x.ID) > -1;
+        const fixo = x.ID === movId;
+        return '<tr'+(marcado ? ' class="sel"' : '')+'>'
+          + '<td><input type="checkbox" '+(marcado?'checked':'')+(fixo?' disabled title="movimento de origem"':'')
+            + ' style="width:16px;height:16px;accent-color:var(--brand)"'
+            + ' onchange="marcarMovJuntar(\''+movId+'\',\''+x.ID+'\',this.checked)"></td>'
+          + '<td>'+dataBR(x.DATA)+'</td>'
+          + '<td>'+esc(x.IDENTIFICACAO||'—')
+            + (x.STATUS === 'Nao identificado' ? ' <span class="tag t-ni">não identificado</span>' : '')
+            + (fixo ? ' <span class="mini">(origem)</span>' : '')+'</td>'
+          + '<td class="mini">'+esc(x.BANCO||'—')+'</td>'
+          + '<td class="num">'+nMoeda(Math.abs(n(x.VALOR)))+'</td></tr>';
+      }).join('')
+    + '</tbody></table></div>';
+
+  box.innerHTML = tabelaAlvo + tabelaMovs
+    + '<div class="barraSel" style="margin-top:12px"><b>'+JUNT.movs.length+'</b> '
+    + (deb ? 'débito' : 'crédito') + (JUNT.movs.length > 1 ? 's' : '') + ' · soma ' + moeda(soma)
+    + (alvo
+        ? ' · registro ' + (alvo.semBoleto ? '<span class="mini">sem valor lançado</span>' : moeda(alvo.valor))
+          + (alvo.semBoleto ? ''
+             : Math.abs(falta) < 0.01 ? ' · <span class="pos">fecha certo</span>'
+             : falta > 0 ? ' · <span class="neg">faltam ' + moeda(falta) + '</span>'
+                         : ' · <span class="neg">passou ' + moeda(-falta) + '</span>')
+        : ' · <span class="neg">escolha o registro de destino</span>')
+    + '</div>'
+    + '<p class="mini" style="margin-top:6px">A baixa fica com a data do '
+    + (deb ? 'último débito' : 'último crédito')
+    + ' e com a soma dos valores. Se a soma não fechar com o valor lançado, o sistema pergunta antes se o '
+    + 'registro deve passar a valer o que realmente ' + (deb ? 'saiu' : 'entrou') + '.</p>';
+}
+function confirmarJuntar(movId){
+  if (!JUNT.alvo) return toast('Escolha o registro de destino.','erro');
+  if (JUNT.movs.length < 2) return toast('Marque ao menos dois movimentos — para um só, use "Vincular".','erro');
+  const alvoId = JUNT.alvo, movs = JUNT.movs.slice();
+  const soma = somaJuntar();
+  const a = alvoUnico(alvoId);
+  const travado = a.tipo === 'pagar' && liberacao(a.cp).tipo === 'nao';
+  if (travado && !confirm('A parcela do cliente de "' + (a.cp.FAVORECIDO || '—') + '" ainda não foi conciliada.'
+      + '\n\nOs débitos somam ' + moeda(soma) + ' e já saíram da conta, então o pagamento aconteceu. '
+      + 'Registrar a baixa mesmo assim?')) return;
+
+  const lancado = rd(valorDoAlvo(a));
+  if (!lancado || Math.abs(soma - lancado) <= 0.01){
+    fecharModal();
+    return conciliarVariosMovs(movs, alvoId, travado);
+  }
+  const dif = rd(soma - lancado);
+  modal('Valores diferentes',
+    '<p>O registro está lançado com <b>'+moeda(lancado)+'</b> e os '+movs.length
+    + ' movimentos somam <b>'+moeda(soma)+'</b> — uma diferença de <b class="'+(dif>0?'pos':'neg')+'">'
+    + moeda(Math.abs(dif))+'</b>' + (dif > 0 ? ' a mais' : ' a menos') + '.</p>'
+    + '<p style="margin-top:10px">Deseja alterar o valor do registro para a soma dos movimentos e conciliar?</p>'
+    + '<p class="mini" style="margin-top:10px">Alterando, o rateio entre cliente e escritório é recalculado na '
+    + 'mesma proporção. Mantendo, o registro fica com o valor lançado e a baixa usa a soma do extrato.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Cancelar</button>'
+    + '<button class="btn sec" onclick="fecharModal();conciliarVariosMovs('+JSON.stringify(movs)+',\''+alvoId+'\','+(travado?'1':'0')+')">'
+    + 'Manter '+moeda(lancado)+'</button>'
+    + '<button class="btn ok" onclick="fecharModal();conciliarVariosMovs('+JSON.stringify(movs)+',\''+alvoId+'\','+(travado?'1':'0')+',1)">'
+    + 'Sim, usar '+moeda(soma)+'</button>', 'estreita');
+}
+/* valor lançado do registro, qualquer que seja o tipo */
+function valorDoAlvo(a){
+  if (!a || !a.tipo) return 0;
+  if (a.tipo === 'parcela') return n(a.p.VALOR);
+  if (a.tipo === 'pagar') return n(a.cp.VALOR);
+  if (a.tipo === 'receber') return n(a.cr.VALOR);
+  return 0;
+}
+/* Baixa um registro com a soma de vários movimentos do extrato. */
+async function conciliarVariosMovs(movIds, alvoId, forcar, ajustarValor){
+  const movs = (movIds||[]).map(id => (DB.EXTRATO||[]).find(x => x.ID === id)).filter(Boolean);
+  if (movs.length < 2) return toast('Marque ao menos dois movimentos.','erro');
+  if (movs.some(x => x.STATUS === 'Conciliado'))
+    return toast('Um dos movimentos já foi conciliado. Atualize a tela e tente de novo.','erro');
+  const soma = rd(movs.reduce((s,x) => s + Math.abs(n(x.VALOR)), 0));
+  if (soma <= 0) return toast('A soma dos movimentos precisa ser maior que zero.','erro');
+
+  const lote = [];
+  if (ajustarValor){
+    const r = loteAjusteValor(alvoId, soma);
+    if (r.erro) return toast(r.erro,'erro');
+    r.lote.forEach(x => lote.push(x));
+    // o registro reescrito precisa valer já na montagem da baixa
+    r.lote.forEach(it => {
+      const L = DB[it.aba] || (DB[it.aba] = []);
+      const j = L.findIndex(x => x.ID === it.registro.ID);
+      if (j >= 0) L[j] = it.registro; else L.push(it.registro);
+    });
+    invalidarIdx();
+  }
+  // movimento sintético: a data do último crédito, o valor somado e os ids juntos
+  const ult = movs.slice().sort((a,b) => String(a.DATA).localeCompare(String(b.DATA)))[movs.length-1];
+  const sintetico = {ID: movs.map(x => x.ID).join('|'), DATA: ult.DATA,
+    VALOR: ehDebito(ult) ? -soma : soma, BANCO: ult.BANCO || '',
+    IDENTIFICACAO: movs.length + (ehDebito(ult) ? ' débitos somados' : ' créditos somados')};
+  const r = loteDoAlvo(sintetico, alvoId, soma, forcar);
+  if (r.erro) return toast(r.erro,'erro');
+  r.lote.forEach(x => lote.push(x));
+  movs.forEach(x => lote.push({aba:'EXTRATO', registro: Object.assign({}, x,
+    {STATUS:'Conciliado', PARCELA_ID: alvoId, OBS: x.OBS || ''})}));
+
+  salvarLoteRapido(lote);
+  toast(movs.length + ' movimentos somados em um registro — ' + moeda(soma) + ' · ' + r.resumo + '.','ok');
+}
+
 function confirmarVinculos(movId){
   const travados = Object.keys(VINC)
     .map(id => (indices().cp.get(id) || null))
@@ -3653,6 +3930,8 @@ function confirmarVinculos(movId){
 function movDoRegistro(id){
   return (DB.EXTRATO||[]).find(m => m.STATUS === 'Conciliado' && idsDoMov(m).indexOf(id) > -1) || null;
 }
+/* quantos movimentos do extrato somaram para baixar este registro */
+const quantosMovsDoRegistro = id => movsDoRegistro(id).length;
 /* desfaz a baixa de um registro: ele volta para contas a receber ou a pagar
    e o movimento volta para a fila da conciliação */
 async function desconciliarRegistro(id){
@@ -3661,6 +3940,8 @@ async function desconciliarRegistro(id){
     const juntos = idsDoMov(mov);
     if (juntos.length > 1 && !confirm('Este movimento do extrato foi conciliado com ' + juntos.length
         + ' registros de uma vez. Desconciliar devolve todos eles e o movimento inteiro volta para a conciliação.\n\nContinuar?')) return;
+    // vários movimentos somados neste registro: o desfazer já trata o grupo,
+    // e a pergunta dele é a que explica isso
     return desfazer(mov.ID);
   }
   // registro dado como recebido sem movimento vinculado
@@ -3712,12 +3993,11 @@ function vincularUm(movId, alvoId, valorRegistro, travado){
     + '<button class="btn ok" onclick="fecharModal();ajustarEConciliar(\''+movId+'\',\''+alvoId+'\','+(travado?'1':'0')+')">'
     + 'Sim, usar '+moeda(mov)+'</button>', 'estreita');
 }
-async function ajustarEConciliar(movId, alvoId, forcar){
-  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
-  const novo = rd(Math.abs(n(m.VALOR)));
+/* Reescreve o valor lançado de um registro, mantendo a proporção do rateio.
+   Uma função só, usada pelo vínculo de um movimento e pelo de vários. */
+function loteAjusteValor(alvoId, novo){
   const lote = [];
   const escala = (v, f) => String(v == null ? '' : v).trim() === '' ? v : rd(n(v) * f);
-
   const p = parcDe(alvoId);
   if (p){
     const antigo = n(p.VALOR) || novo;
@@ -3735,9 +4015,17 @@ async function ajustarEConciliar(movId, alvoId, forcar){
     } else {
       const cp = indices().cp.get(alvoId);
       if (cp) lote.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, cp, {VALOR: novo})});
+      else return {erro:'Registro de destino não encontrado.'};
     }
   }
-  if (lote.length) salvarLoteRapido(lote);   // o registro já fica com o valor novo
+  return {lote};
+}
+async function ajustarEConciliar(movId, alvoId, forcar){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
+  const novo = rd(Math.abs(n(m.VALOR)));
+  const r = loteAjusteValor(alvoId, novo);
+  if (r.erro) return toast(r.erro,'erro');
+  if (r.lote.length) salvarLoteRapido(r.lote);   // o registro já fica com o valor novo
   toast('Valor do registro ajustado para ' + moeda(novo) + '.','ok');
   return conciliar(movId, alvoId, forcar);
 }
@@ -3779,13 +4067,43 @@ function reverterAlvo(a){
   return {lote, apagar};
 }
 
+/* Todos os movimentos conciliados que apontam para um registro. Com a soma de
+   vários créditos num só registro, são vários — e desfazer um sem os outros
+   deixaria o registro baixado por um valor que já não corresponde a nada. */
+function movsDoRegistro(id){
+  return (DB.EXTRATO||[]).filter(m => m.STATUS === 'Conciliado' && idsDoMov(m).indexOf(id) > -1);
+}
+/* O grupo que cai junto: a partir de um movimento, os registros que ele baixou
+   e todos os movimentos que baixaram esses mesmos registros. */
+function grupoConciliacao(movId){
+  const m = (DB.EXTRATO||[]).find(x => x.ID === movId);
+  if (!m) return {movs:[], ids:[]};
+  const movs = new Map([[m.ID, m]]);
+  const ids = new Set();
+  let mudou = true;
+  while (mudou){
+    mudou = false;
+    [...movs.values()].forEach(x => idsDoMov(x).forEach(id => {
+      if (!ids.has(id)){ ids.add(id); mudou = true; }
+    }));
+    [...ids].forEach(id => movsDoRegistro(id).forEach(x => {
+      if (!movs.has(x.ID)){ movs.set(x.ID, x); mudou = true; }
+    }));
+  }
+  return {movs:[...movs.values()], ids:[...ids]};
+}
 async function desfazer(movId, semPerguntar){
   const m = (DB.EXTRATO||[]).find(x => x.ID === movId); if (!m) return;
-  const alvos = alvosDe(m);
-  const quantos = alvos.length;
-  if (!semPerguntar && !confirm(quantos > 1
-      ? 'Desfazer a conciliação deste movimento com ' + quantos + ' registros? Todos voltam ao estado anterior.'
-      : 'Desfazer? O registro volta ao estado anterior e as comissões geradas são removidas.')) return;
+  const g = grupoConciliacao(movId);
+  const alvos = g.ids.map(alvoUnico).filter(a => a.tipo);
+  const quantos = alvos.length, quantosMovs = g.movs.length;
+  if (!semPerguntar && !confirm(
+      quantosMovs > 1
+        ? 'Este registro foi baixado pela soma de ' + quantosMovs + ' movimentos do extrato. Desfazer '
+          + 'devolve todos eles para a conciliação e o registro volta ao estado anterior.\n\nContinuar?'
+      : quantos > 1
+        ? 'Desfazer a conciliação deste movimento com ' + quantos + ' registros? Todos voltam ao estado anterior.'
+        : 'Desfazer? O registro volta ao estado anterior e as comissões geradas são removidas.')) return;
 
   let lote = [], apagar = [];
   for (const a of alvos){
@@ -3793,7 +4111,7 @@ async function desfazer(movId, semPerguntar){
     if (r.erro) return toast(r.erro,'erro');
     lote = lote.concat(r.lote); apagar = apagar.concat(r.apagar);
   }
-  lote.push({aba:'EXTRATO', registro: Object.assign({}, m, {STATUS:'Pendente', PARCELA_ID:''})});
+  g.movs.forEach(x => lote.push({aba:'EXTRATO', registro: Object.assign({}, x, {STATUS:'Pendente', PARCELA_ID:''})}));
   apagar.forEach(x => { DB[x.aba] = (DB[x.aba]||[]).filter(y => y.ID !== x.id); });
   lote.forEach(it => {
     const L = DB[it.aba] || (DB[it.aba] = []);
@@ -3862,7 +4180,8 @@ function escolherManual(movId){
     + 'oninput="pintarVinculoUm(\''+movId+'\')"></div>'
     + '<div id="boxVincUm"></div>',
     '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
-    + '<button class="btn sec" onclick="fecharModal();formVincularVarios(\''+movId+'\')">Vincular vários</button>',
+    + '<button class="btn sec" onclick="fecharModal();formVincularVarios(\''+movId+'\')">Vincular vários</button>'
+    + '<button class="btn sec" onclick="fecharModal();formJuntarCreditos(\''+movId+'\')">Juntar movimentos</button>',
     'larga');
   pintarVinculoUm(movId);
   const e = document.getElementById('vmBusca'); if (e) e.focus();
@@ -4095,9 +4414,10 @@ function montaAcordo(box){
           'oninput="pintarParcelas()"')
     + (cpc ? '' :
         inp('lcTotal','Valor total do acordo (R$)', total, '', 'text', 'oninput="recalcParcelas()"')
-      + inp('lcPctCli','% do cliente', 70, '', 'number', 'step="0.01" oninput="espelhaPct(1)"')
-      + inp('lcPctEsc','% do escritório', 30, '', 'number', 'step="0.01" oninput="espelhaPct(2)"')
+      + inp('lcPctCli','% do cliente', pctClientePadrao(), '', 'number', 'step="0.01" oninput="espelhaPct(1)"')
+      + inp('lcPctEsc','% do escritório', rd(100 - pctClientePadrao()), '', 'number', 'step="0.01" oninput="espelhaPct(2)"')
       + inp('lcSuc','Honorários de sucumbência (R$)','', '', 'text', 'oninput="recalcParcelas()"')
+      + '<div class="campo full" id="avisoSoEsc" style="padding:0;margin:0"></div>'
       + '<div class="check"><input type="checkbox" id="lcTarifa" checked><label for="lcTarifa">Deduzir tarifa bancária da parte do cliente</label></div>')
     + '<div class="full" id="boxParcelas"></div>'
     + '<input type="hidden" id="lcSub" value="'+esc(val('ncCat'))+'">'
@@ -5500,7 +5820,10 @@ function telaReceber(){
       + '<button class="btn sm per" onclick="excluirReceber([\''+r.id+'\'])">Excluir</button>'
       + '</td></tr>').join('')
       : '<tr><td colspan="10">'+vazio('Nada a receber','Cadastre um lançamento para gerar parcelas.')+'</td></tr>')
-    + '</tbody></table></div></div>';
+    + '</tbody>'
+    + rodapeTotal(L.length, 'Total a receber', 6,
+        [somaCampo(L,'valor'), somaCampo(L,'cli'), somaCampo(L,'esc')], 1)
+    + '</table></div></div>';
 }
 /* Nova conta a receber — os mesmos campos e as mesmas regras do lançamento.
    O registro sempre teve colunas de pasta, praça, EXEC e divisão com o cliente;
@@ -5660,21 +5983,30 @@ function telaRecebidas(){
   let L = (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida').map(p => {
     const l = lancDe(p.LANC_ID);
     return {id:p.ID, tipo:'parcela', pasta:l.PASTA, cliente:l.CLIENTE, proc:l.N_PROCESSO,
+            cat: p.TIPO === 'Sucumbência' ? 'Sucumbência' : (l.SUBCLASSE || ''),
+            sub: l.SUBCATEGORIA || '',
             desc:p.TIPO + (p.NUM>0?' '+p.NUM:''), data:p.DATA_CREDITO, valor:n(p.VALOR_CREDITADO||p.VALOR),
-            cli:n(p.VALOR_CLIENTE), esc:n(p.VALOR_ESCRITORIO), tar:n(p.TARIFA), lanc:l.ID};
+            cli:n(p.VALOR_CLIENTE), esc:n(p.VALOR_ESCRITORIO), tar:n(p.TARIFA), lanc:l.ID,
+            movs:p.MOV_ID||''};
   });
   (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido').forEach(c =>
     L.push({id:c.ID, tipo:'avulso', pasta:c.PASTA || '—', cliente:c.CLIENTE, proc:c.PRACA || '', desc:c.DESCRICAO, data:c.DATA_RECEB,
+            cat:c.CATEGORIA || '', sub:c.SUBCATEGORIA || '',
             valor:n(c.VALOR), cli:n(c.VALOR_CLIENTE),
             esc:n(c.VALOR_ESCRITORIO) || n(c.VALOR), tar:n(c.TARIFA), lanc:''}));
   // o dinheiro entrou na conta, então o crédito conta no total do dia mesmo
   // sem origem definida; a destinação é que fica pendente
   naoId.filter(m => !ehDebito(m)).forEach(m =>
     L.push({id:m.ID, tipo:'naoid', pasta:'—', cliente:'', proc:'', desc:m.IDENTIFICACAO || 'Depósito não identificado',
+            cat:'', sub:'',
             data:m.DATA, valor:Math.abs(n(m.VALOR)), cli:0, esc:0, tar:0, lanc:'', obs:m.OBS||''}));
 
+  // as categorias do seletor saem do que está na tela: só aparece o que existe
+  const catsRc = [...new Set(L.map(r => r.cat).filter(Boolean))].sort((a,b) => a.localeCompare(b));
+  const semCat = L.some(r => !r.cat);
   L = L.filter(r => entreDatas(r.data, FILTROS.rcDe, FILTROS.rcAte))
-       .filter(r => contem([r.pasta, r.cliente, r.desc].join(' '), FILTROS.rcBusca))
+       .filter(r => contem([r.pasta, r.cliente, r.desc, r.cat, r.sub].join(' '), FILTROS.rcBusca))
+       .filter(r => !FILTROS.rcCat || (FILTROS.rcCat === '__sem' ? !r.cat : r.cat === FILTROS.rcCat))
        .filter(r => entreValores(r.valor, FILTROS.rcMin, FILTROS.rcMax))
        .sort((a,b) => String(b.data).localeCompare(String(a.data)));
 
@@ -5684,15 +6016,20 @@ function telaRecebidas(){
     + '<div class="filtros">'
     + campoData('rcDe','Crédito de') + campoData('rcAte','até')
     + campoTexto('rcBusca','Pasta, cliente ou descrição','buscar…')
+    + sel('rcCat','Categoria', [['','Todas']].concat(catsRc.map(c => [c,c]))
+        .concat(semCat ? [['__sem','— sem categoria —']] : []),
+        FILTROS.rcCat||'', '', 'onchange="setF(\'rcCat\',this.value)"')
     + campoValor('rcMin','Valor de') + campoValor('rcMax','Valor até')
-    + botaoLimpar(['rcDe','rcAte','rcBusca','rcMin','rcMax'])
+    + botaoLimpar(['rcDe','rcAte','rcBusca','rcCat','rcMin','rcMax'])
     + '</div>'
     + '<div class="card"><div class="tw"><table><thead><tr><th>Crédito</th><th>Pasta / cliente</th><th>Descrição</th>'
+    + '<th>Categoria</th>'
     + '<th class="num">Valor</th><th class="num">Cliente</th><th class="num">Tarifa</th><th class="num">Escritório</th><th></th></tr></thead><tbody>'
     + (L.length ? L.map(r => r.tipo === 'naoid'
       ? '<tr class="grifo"><td>'+dataBR(r.data)+'</td>'
         + '<td><span class="tag t-ni">não identificado</span></td>'
         + '<td>'+esc(r.desc)+(r.obs ? '<div class="mini" style="color:var(--brass)">'+esc(r.obs)+'</div>' : '')+'</td>'
+        + '<td><span class="mini">a definir</span></td>'
         + '<td class="num">'+nMoeda(r.valor)+'</td>'
         + '<td class="num"><span class="mini">a definir</span></td>'
         + '<td class="num">—</td>'
@@ -5701,8 +6038,9 @@ function telaRecebidas(){
         + '<button class="btn sm sec" onclick="irPara(\'recebidas\',\'naoid\')">Identificar</button> '
         + '<button class="btn sm sec" onclick="formObsMov(\''+r.id+'\')">Observações</button>'
         + '</td></tr>'
-      : '<tr><td>'+dataBR(r.data)+'</td>'
+      : '<tr><td>'+dataBR(r.data)+seloVariosMovs(r.movs)+'</td>'
       + '<td>'+pastaCliente(r.pasta, r.cliente)+'</td><td>'+esc(r.desc)+'</td>'
+      + '<td>'+esc(r.cat||'—')+(r.sub ? '<div class="mini">'+esc(r.sub)+'</div>' : '')+'</td>'
       + '<td class="num">'+nMoeda(r.valor)+'</td>'
       + '<td class="num">'+nMoeda(r.cli)+'<div class="mini">'+pctSobre(rd(r.cli + r.tar), r.valor)+'</div></td>'
       + '<td class="num">'+(r.tar?nMoeda(r.tar):'—')+'</td>'
@@ -5715,8 +6053,11 @@ function telaRecebidas(){
       + '<button class="btn sm per" title="Devolver para contas a receber e o movimento para a conciliação" '
         + 'onclick="desconciliarRegistro(\''+r.id+'\')">Desconciliar</button>'
       + '</td></tr>').join('')
-      : '<tr><td colspan="8">'+vazio('Nada recebido ainda','Concilie um crédito para que ele apareça aqui.')+'</td></tr>')
-    + '</tbody></table></div></div>';
+      : '<tr><td colspan="9">'+vazio('Nada recebido ainda','Concilie um crédito para que ele apareça aqui.')+'</td></tr>')
+    + '</tbody>'
+    + rodapeTotal(L.length, 'Total recebido', 4,
+        [somaCampo(L,'valor'), somaCampo(L,'cli'), somaCampo(L,'tar'), somaCampo(L,'esc')], 1)
+    + '</table></div></div>';
 }
 
 /* descrição e memória do repasse, sempre derivadas do recebimento de origem */
@@ -6116,7 +6457,9 @@ function telaPagar(){
       + '<button class="btn sm per" onclick="apagarSimples(\'CONTAS_PAGAR\',\''+c.ID+'\')">Excluir</button>'
       + '</td></tr>').join('')
       : '<tr><td colspan="7">'+vazio('Nenhuma conta a pagar','O repasse ao cliente entra aqui já no lançamento do acordo, com ✕, e ganha o ✓ quando a parcela é conciliada.')+'</td></tr>')
-    + '</tbody></table></div></div>';
+    + '</tbody>'
+    + rodapeTotal(L.length, 'Total a pagar', 5, [somaCampo(L,'VALOR')], 1)
+    + '</table></div></div>';
 }
 let REC_TMP = [];
 function formCP(id){
@@ -7336,7 +7679,9 @@ function telaContaCorrente(){
           + '<button class="btn sm sec" onclick="desfazer(\''+r.m.ID+'\')">Desfazer</button></td></tr>';
       }).join('')
       : '<tr><td colspan="8">'+vazio('Nenhum movimento conciliado','Concilie os créditos e débitos do extrato para vê-los aqui.')+'</td></tr>')
-    + '</tbody></table></div></div>'
+    + '</tbody>'
+    + rodapeTotal(L.length, 'Total no filtro', 4, [cred, Math.abs(deb), acum], 1)
+    + '</table></div></div>'
     + '<p class="mini">O saldo acumulado soma apenas os movimentos conciliados dentro do filtro — não é o saldo da conta no banco.</p>';
 }
 /* avisa quando só os movimentos recentes foram carregados */
@@ -7397,7 +7742,9 @@ function telaPagas(){
       + botaoDesfazerPago(c)
       + ' <button class="btn sm per" onclick="apagarSimples(\'CONTAS_PAGAR\',\''+c.ID+'\')">Excluir</button></td></tr>').join('')
       : '<tr><td colspan="7">'+vazio('Nenhuma conta paga','As contas aparecem aqui quando o débito correspondente é conciliado no extrato.')+'</td></tr>')
-    + '</tbody></table></div></div>';
+    + '</tbody>'
+    + rodapeTotal(L.length, 'Total pago', 5, [total], 1)
+    + '</table></div></div>';
 }
 function botaoDesfazerPago(c){
   return '<button class="btn sm per" title="Devolver para contas a pagar e o movimento para a conciliação" '
@@ -7790,12 +8137,53 @@ function apagarDoResumo(tipo, id){
 }
 
 /* a relação de um cartão do resumo */
+/* ── Busca dentro de cada pendência do resumo ──
+   Uma por cartão, guardada por chave: a janela do detalhe repinta só a lista,
+   então o cursor não sai do campo enquanto se digita. A busca alcança data,
+   quem, descrição e também o valor (1000, 1.000,00 e 1000,00 acham o mesmo). */
+let BUSCA_RESUMO = {};
+function buscarResumo(chave, v){
+  BUSCA_RESUMO[chave] = v;
+  clearTimeout(window._br);
+  window._br = setTimeout(() => pintarDetalheResumo(chave), 250);
+}
+function limparBuscaResumo(chave){
+  BUSCA_RESUMO[chave] = '';
+  const e = document.getElementById('rsBusca');
+  if (e) e.value = '';
+  pintarDetalheResumo(chave);
+}
+function linhasResumoFiltradas(chave){
+  const it = resumoItens().find(x => x.chave === chave);
+  if (!it) return {it:null, L:[], todas:0, termo:''};
+  const termo = String(BUSCA_RESUMO[chave] || '').trim();
+  const L = !termo ? it.linhas : it.linhas.filter(r =>
+    contem([dataBR(r.quando), r.quem, r.oque].join(' '), termo) || casaValor(r.valor, termo));
+  return {it, L, todas:it.linhas.length, termo};
+}
 function detalheResumo(chave){
   const it = resumoItens().find(x => x.chave === chave);
   if (!it) return;
-  const L = it.linhas;
-  const corpo = !L.length
-    ? vazio('Nada aqui', 'Nenhum lançamento nesta situação.')
+  BUSCA_RESUMO[chave] = '';
+  modal(it.titulo,
+    '<div class="campo" style="margin-bottom:12px"><label for="rsBusca">Buscar nesta pendência</label>'
+    + '<input id="rsBusca" autocomplete="off" placeholder="data, nome, descrição ou valor…" '
+    + 'oninput="buscarResumo(\''+chave+'\',this.value)"></div>'
+    + '<div id="boxResumoDet"></div>',
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
+  pintarDetalheResumo(chave);
+  const e = document.getElementById('rsBusca'); if (e) e.focus();
+}
+function pintarDetalheResumo(chave){
+  const box = document.getElementById('boxResumoDet'); if (!box) return;
+  const {it, L, todas, termo} = linhasResumoFiltradas(chave);
+  if (!it) return;
+  box.innerHTML = !L.length
+    ? vazio(termo ? 'Nada encontrado' : 'Nada aqui',
+            termo ? 'Nenhum dos ' + todas + ' lançamento(s) desta pendência casa com "' + termo + '".'
+                  : 'Nenhum lançamento nesta situação.')
+      + (termo ? '<p class="mini" style="margin-top:8px"><button class="btn sm sec" '
+          + 'onclick="limparBuscaResumo(\''+chave+'\')">Limpar a busca</button></p>' : '')
     : '<div class="tw" style="max-height:440px;overflow:auto"><table class="densa"><thead><tr>'
       + '<th>' + esc(it.colQuando) + '</th><th>' + esc(it.colQuem) + '</th>'
       + '<th>' + esc(it.colOque) + '</th><th class="num">Valor</th><th></th></tr></thead><tbody>'
@@ -7814,12 +8202,15 @@ function detalheResumo(chave){
           + (r.del ? ' <button class="btn sm per" onclick="apagarDoResumo(\''+r.del.tipo+'\',\''
               + esc(r.del.id)+'\')">Excluir</button>' : '')
           + '</td></tr>').join('')
-      + '</tbody><tfoot><tr class="total"><td colspan="3">Total</td>'
+      + '</tbody><tfoot><tr class="total"><td colspan="3">Total'
+      + (termo ? ' de ' + L.length + ' de ' + todas : '') + '</td>'
       + '<td class="num">'+nMoeda(rd(L.reduce((s,x) => s + n(x.valor), 0)))+'</td><td></td></tr></tfoot></table></div>'
+      + (termo ? '<p class="mini" style="margin-top:8px">Mostrando <b>'+L.length+'</b> de '+todas
+          + ' — o total acima é só do que está filtrado. '
+          + '<button class="btn sm sec" onclick="limparBuscaResumo(\''+chave+'\')">Limpar a busca</button></p>' : '')
       + '<p class="mini" style="margin-top:10px">Editar e excluir daqui seguem o mesmo caminho das telas de '
       + 'contas: a exclusão pergunta o que fazer com o repasse ao cliente e devolve à conciliação os '
       + 'movimentos que estavam vinculados. Depósito do extrato não tem excluir — ele é o extrato do banco.</p>';
-  modal(it.titulo, corpo, '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
 }
 
 /* As linhas do resumo em formato de tabela, para a planilha, o CSV e o papel. */
