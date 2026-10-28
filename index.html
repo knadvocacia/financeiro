@@ -328,7 +328,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v12.4';
+const VERSAO_APP = 'v12.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -2108,7 +2108,7 @@ function telaLancamentos(){
     return '<tr>'
       + (comData ? '<td>'+(l.DATA_ACORDO ? dataBR(l.DATA_ACORDO) : '—')
           + (l.AUDIENCIA ? '<div class="mini">'+esc(l.AUDIENCIA)+'</div>' : '')+'</td>' : '')
-      + '<td>'+pastaCliente(l.PASTA, l.CLIENTE)+'</td>'
+      + '<td>'+pastaCliente(l.PASTA, l.CLIENTE)+clipeAnexos(l)+'</td>'
       + '<td>'+esc(l.N_PROCESSO||'—')+'<div class="mini">'+esc(l.PRACA||'')+'</div></td>'
       + '<td>'+esc(l.SUBCLASSE||'—')+(l.EXEC==='SIM'?' <span class="tag t-neutro">EXEC</span>':'')+'</td>'
       + '<td class="num">'+nMoeda(l.VALOR_TOTAL)+'</td>'
@@ -2193,6 +2193,8 @@ function formLanc(id){
     + '<div class="secao-form">Vencimento e valor de cada parcela</div>'
     + '<div class="full" id="boxParcelas"></div>'
     + '<div class="campo full"><label for="lcObs">Observações</label><textarea id="lcObs" rows="2">'+esc(l.OBS||'')+'</textarea></div>'
+    + campoAnexos('LANCAMENTOS', l, 'lcArq',
+        'Anexos — acordo, ata, sentença, comprovantes (PDF ou imagem)')
     + '</div>',
     '<button class="btn sec" onclick="fecharModal()">Cancelar</button><button class="btn" onclick="gravarLanc(\''+(id||'')+'\')">Salvar lançamento</button>',
     'larga');
@@ -2520,6 +2522,13 @@ async function gravarLanc(id, opcoes){
   const pctEsc = cpc ? (somaT ? rd(somaE / somaT * 100) : 0) : n(val('lcPctEsc'));
   if (!cpc && rd(pctCli + pctEsc) !== 100) return toast('Os percentuais de cliente e escritório devem somar 100%.','erro');
 
+  // os arquivos sobem antes de gravar e se somam aos que já estavam no acordo
+  const antigoL = id ? lancDe(id) : null;
+  const anexoLanc = temArquivos('lcArq')
+    ? await subirAnexos('lcArq', 'LANCAMENTOS', id, antigoL)
+    : juntarAnexos(anexosDe(antigoL));
+  if (anexoLanc === null) return null;
+
   const lanc = {
     ID: id || uid('l'), PASTA: tit(val('lcPasta')), CLIENTE: tit(val('lcCliente')), DOC: val('lcDoc'),
     N_PROCESSO: val('lcProc'), PRACA: val('lcPraca'), FILIAL: '',
@@ -2533,7 +2542,8 @@ async function gravarLanc(id, opcoes){
     OBS: val('lcObs'), STATUS: 'Ativo',
     DATA_ACORDO: val('lcDataAcordo'), AUDIENCIA: val('lcAudiencia'), ADVOGADO: tit(val('lcAdvogado')),
     CRIADO_EM: (id && lancDe(id).CRIADO_EM) || agoraTexto(),
-    CRIADO_POR: (id && lancDe(id).CRIADO_POR) || (USER ? USER.NOME : '')
+    CRIADO_POR: (id && lancDe(id).CRIADO_POR) || (USER ? USER.NOME : ''),
+    ANEXO_URL: anexoLanc
   };
 
   const excluirCP = [];
@@ -2734,6 +2744,23 @@ const contasSemDados = () => (DB.CONTAS_PAGAR||[])
    todos, e receber a conta vale para todos também. Comissão fica fora — ela é
    do advogado, não do cliente. Repasse de recebimento avulso não tem processo,
    então o grupo é só ele. */
+/* A categoria de um repasse não é "Repasse a cliente" — essa é igual em todos
+   e não informa nada. O que interessa é de onde o dinheiro veio: a categoria do
+   acordo que gerou a parcela, ou a do recebimento avulso. */
+function categoriaOrigemCP(c){
+  if (!c) return {cat:'', sub:''};
+  const p = parcDe(c.PARCELA_ID);
+  if (p){
+    const l = lancDe(p.LANC_ID);
+    if (p.TIPO === 'Sucumbência') return {cat:'Sucumbência', sub:l.SUBCATEGORIA || ''};
+    return {cat:l.SUBCLASSE || '', sub:l.SUBCATEGORIA || ''};
+  }
+  const cr = (indices().cr && indices().cr.get(c.PARCELA_ID))
+          || (DB.CONTAS_RECEBER||[]).find(x => x.ID === c.PARCELA_ID);
+  if (cr) return {cat:cr.CATEGORIA || '', sub:cr.SUBCATEGORIA || ''};
+  // repasse lançado à mão, sem origem: vale a subcategoria dele, se houver
+  return {cat:'', sub:c.SUBCATEGORIA || ''};
+}
 function repassesDoProcesso(cp){
   if (!cp) return [];
   const ehRepasse = x => String(x.CATEGORIA||'') === 'Repasse a cliente';
@@ -5982,7 +6009,7 @@ function telaReceber(){
         + (vencido(r.venc) ? '<div class="mini neg">'
             + Math.round(diasEntre(r.venc, hoje())) + ' dia(s) em atraso</div>' : '')+'</td>'
       + '<td>'+pastaCliente(r.pasta, r.cliente)+'</td>'
-      + '<td>'+esc(r.desc)+'</td>'
+      + '<td>'+esc(r.desc)+clipeAnexos(r.reg)+clipeAnexos(r.tipo === 'parcela' ? r.lancReg : null)+'</td>'
       + '<td>'+esc(r.cat||'—')+(r.sub ? '<div class="mini">'+esc(r.sub)+'</div>' : '')+'</td>'
       + '<td class="mini">'+esc(r.proc||'—')+'</td>'
       + '<td class="num">'+nMoeda(r.valor)+'</td><td class="num">'+nMoeda(r.cli)+'</td><td class="num">'+nMoeda(r.esc)+'</td>'
@@ -6043,6 +6070,8 @@ function formCR(id){
     + inp('crTarifaV','Valor da tarifa (R$)', nMoeda(tar0 || tarifaPadrao()), '', 'text', 'oninput="sincronizaCR()"')
     + '<p class="mini full" id="avisoCR" style="margin:-4px 0 2px"></p>'
     + '<div class="campo full"><label for="crObs">Observações</label><textarea id="crObs" rows="2">'+esc(c.OBS||'')+'</textarea></div>'
+    + campoAnexos('CONTAS_RECEBER', c, 'crArq',
+        'Anexos — contrato, nota, comprovantes (PDF ou imagem)')
     + '</div>'
     + '<p class="mini" style="margin-top:8px">Havendo valor para o cliente, o repasse já entra em contas a pagar, '
     + 'travado até o crédito ser conciliado no extrato. O recebimento é dado como baixado apenas na conciliação.</p>',
@@ -6107,6 +6136,11 @@ async function gravarCR(id){
   if (cpAntigo && cpAntigo.STATUS === 'Pago' && rd(n(cpAntigo.VALOR)) !== cli2)
     return toast('O repasse ao cliente já foi pago. Desfaça a baixa dele antes de mudar a divisão.','erro');
 
+  const anexoCR = temArquivos('crArq')
+    ? await subirAnexos('crArq', 'CONTAS_RECEBER', id, atual)
+    : juntarAnexos(anexosDe(atual));
+  if (anexoCR === null) return;
+
   const crId = id || uid('cr');
   const venc = proximoDiaUtil(val('crVenc'));
   let cpId = (cpAntigo && cpAntigo.ID) || '';
@@ -6117,7 +6151,7 @@ async function gravarCR(id){
     PASTA:val('crPasta'), N_PROCESSO:val('crProc'),
     PRACA:val('crPraca'), EXEC: val('crExec') ? 'SIM' : '',
     VALOR_ESCRITORIO:esc2, VALOR_CLIENTE:cli2, TARIFA:tar, CP_ID: cli2 > 0 ? cpId : '',
-    OBS:val('crObs'),
+    OBS:val('crObs'), ANEXO_URL:anexoCR,
     STATUS: atual.STATUS || 'Em aberto', DATA_RECEB: atual.DATA_RECEB || '',
     ORIGEM: atual.ORIGEM || 'Manual'});
 
@@ -6473,33 +6507,76 @@ const nomeAnexo = (a, i) => {
 };
 const urlAnexo = a => { const p = String(a).split('::'); return p.length > 1 ? p.slice(1).join('::') : String(a); };
 
-async function removerAnexoCP(id, indice){
-  const c = (DB.CONTAS_PAGAR||[]).find(x => x.ID === id); if (!c) return;
+/* ── Anexos: o mesmo mecanismo para conta a pagar, conta a receber e lançamento ──
+   Era preso a contas a pagar. O campo ANEXO_URL, a lista e a remoção são iguais
+   nos três, então o que muda é só a aba. */
+const ABAS_ANEXO = {CONTAS_PAGAR:'conta', CONTAS_RECEBER:'conta a receber', LANCAMENTOS:'lançamento'};
+async function removerAnexo(aba, id, indice){
+  const c = (DB[aba]||[]).find(x => x.ID === id); if (!c) return;
   const lista = anexosDe(c);
   const i = Number(indice);
   const alvo = isNaN(i) ? -1 : i;
   if (alvo < 0 || alvo >= lista.length) return;
-  if (!confirm('Remover "' + nomeAnexo(lista[alvo], alvo) + '" desta conta? O arquivo continua no Google Drive.')) return;
+  const onde = ABAS_ANEXO[aba] || 'registro';
+  if (!confirm('Remover "' + nomeAnexo(lista[alvo], alvo) + '" deste ' + onde
+      + '? O arquivo continua no Google Drive.')) return;
   lista.splice(alvo, 1);
   const novo = Object.assign({}, c, {ANEXO_URL: juntarAnexos(lista)});
-  salvarLoteRapido([{aba:'CONTAS_PAGAR', registro: novo}]);
+  salvarLoteRapido([{aba, registro: novo}]);
   const box = document.getElementById('boxAnexos');
-  if (box) box.innerHTML = listaAnexosHTML(novo);
-  toast('Anexo removido da conta.','ok');
+  if (box) box.innerHTML = listaAnexosHTML(novo, aba);
+  toast('Anexo removido do ' + onde + '.','ok');
 }
 /* lista dos anexos já gravados, dentro do formulário */
-function listaAnexosHTML(c){
+function listaAnexosHTML(c, aba){
+  const ab = aba || 'CONTAS_PAGAR';
   const lista = anexosDe(c);
   if (!lista.length) return '<p class="mini" style="margin-top:5px">Nenhum anexo ainda. '
-    + 'Os arquivos ficam na pasta do sistema no Google Drive; sendo PDF, o sistema lê a linha digitável.</p>';
+    + 'Dá para escolher vários arquivos de uma vez. Eles ficam na pasta do sistema no Google Drive'
+    + (ab === 'CONTAS_PAGAR' ? '; sendo PDF, o sistema lê a linha digitável' : '') + '.</p>';
   return '<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">'
     + lista.map((a,i) => '<div style="display:flex;align-items:center;gap:8px;font-size:12.5px">'
       + '<span>📎</span>'
       + '<a href="'+esc(urlAnexo(a))+'" target="_blank" rel="noopener" style="flex:1">'+esc(nomeAnexo(a,i))+'</a>'
-      + '<button class="btn sm sec" onclick="removerAnexoCP(\''+(c.ID||'')+'\','+i+')">Remover</button>'
+      + '<button class="btn sm sec" onclick="removerAnexo(\''+ab+'\',\''+(c.ID||'')+'\','+i+')">Remover</button>'
       + '</div>').join('')
     + '</div>'
     + '<p class="mini" style="margin-top:5px">'+lista.length+' anexo(s). Escolher novos arquivos acrescenta — não substitui.</p>';
+}
+/* o clipe na linha da lista: abre o primeiro anexo e conta quantos há */
+function clipeAnexos(reg){
+  const lista = anexosDe(reg);
+  if (!lista.length) return '';
+  return ' <a href="'+esc(urlAnexo(lista[0]))+'" target="_blank" rel="noopener" title="'
+    + esc(lista.length > 1 ? lista.length + ' anexos — abre o primeiro: ' + nomeAnexo(lista[0],0)
+                           : 'Abrir ' + nomeAnexo(lista[0],0)) + '">📎'
+    + (lista.length > 1 ? '<sup>'+lista.length+'</sup>' : '') + '</a>';
+}
+/* o campo de anexos, igual nos três formulários */
+function campoAnexos(aba, reg, inputId, rotulo, extra){
+  return '<div class="campo full"><label for="'+inputId+'">'+esc(rotulo)+'</label>'
+    + '<input type="file" id="'+inputId+'" accept=".pdf,.jpg,.jpeg,.png" multiple '+(extra||'')+'>'
+    + '<div id="boxAnexos">' + listaAnexosHTML(reg || {}, aba) + '</div></div>';
+}
+/* Sem arquivo escolhido não há nada a enviar: quem grava continua montando o
+   lote sem esperar rede nenhuma, como antes de os anexos existirem. */
+const temArquivos = inputId => {
+  const e = document.getElementById(inputId);
+  return !!(e && e.files && e.files.length);
+};
+/* sobe o que foi escolhido e devolve o campo ANEXO_URL já montado, somando aos
+   que já existiam. Devolve null quando um envio falhou — e já avisou. */
+async function subirAnexos(inputId, aba, id, atual){
+  const lista = anexosDe(atual);
+  const arq = document.getElementById(inputId);
+  const arquivos = arq && arq.files ? [...arq.files] : [];
+  for (const f of arquivos){
+    try{
+      const url = await enviarAnexo(f, aba, id || '');
+      lista.push(f.name + '::' + url);
+    }catch(e){ toast('Não foi possível enviar "' + f.name + '": ' + e.message,'erro'); return null; }
+  }
+  return juntarAnexos(lista);
 }
 /* o repasse ao cliente ganha o campo de pasta, para ligar a conta ao processo */
 function mudouCategoriaCP(){
@@ -6623,9 +6700,7 @@ function telaPagar(){
       + '<td>'+dataBR(c.VENCIMENTO)
         + (conciliandoCP(c) ? '<div class="mini"><span class="tag t-pend">em conciliação</span></div>' : '')
         + '</td><td'+(c.OBS?' title="'+esc(c.OBS)+'"':'')+'>'+esc(c.DESCRICAO)
-      + (anexosDe(c).length
-          ? ' <a href="'+esc(urlAnexo(anexosDe(c)[0]))+'" target="_blank" rel="noopener" title="Abrir o anexo">📎'
-            + (anexosDe(c).length > 1 ? '<sup>'+anexosDe(c).length+'</sup>' : '') + '</a>' : '')
+      + clipeAnexos(c)
       + origemCP(c) + '</td>'
       + '<td>'+esc(c.FAVORECIDO||'—')
       + (semDadosCP(c) ? '<div class="mini"><span class="tag t-pend">sem dados bancários</span></div>' : '')+'</td>'
@@ -6682,10 +6757,8 @@ function formCP(id){
     + '<div class="check full"><input type="checkbox" id="cpSemDados"'+(String(c.SEM_DADOS||'').toUpperCase()==='SIM'?' checked':'')+'>'
       + '<label for="cpSemDados">Não consta dados bancários — o cliente ainda não informou a conta para o repasse</label></div>'
     + '<div class="campo full"><label for="cpObs">Observações</label><textarea id="cpObs" rows="2">'+esc(c.OBS||'')+'</textarea></div>'
-    + '<div class="campo full"><label for="cpArq">Anexos — boleto, comprovante, nota (PDF ou imagem)</label>'
-      + '<input type="file" id="cpArq" accept=".pdf,.jpg,.jpeg,.png" multiple onchange="lerBoleto(this)">'
-      + '<div id="boxAnexos">' + listaAnexosHTML(c) + '</div>'
-      + '</div>'
+    + campoAnexos('CONTAS_PAGAR', c, 'cpArq',
+        'Anexos — boleto, comprovante, nota (PDF ou imagem)', 'onchange="lerBoleto(this)"')
     + '<div class="campo full"><label>Código de barras para pagamento</label>'
       + '<div id="boxLinha"></div></div>'
     + (id ? '' :
@@ -6759,16 +6832,10 @@ async function gravarCP(id){
 
   const fav = garantirFavorecido(tit(val('cpFav')), val('cpCat'));
   // os arquivos sobem para o Drive antes de gravar a conta, e se somam aos que já existem
-  const lista = anexosDe(atual);
-  const arq = document.getElementById('cpArq');
-  const arquivos = arq && arq.files ? [...arq.files] : [];
-  for (const f of arquivos){
-    try{
-      const url = await enviarAnexo(f, 'CONTAS_PAGAR', id || '');
-      lista.push(f.name + '::' + url);
-    }catch(e){ return toast('Não foi possível enviar "' + f.name + '": ' + e.message,'erro'); }
-  }
-  const anexo = juntarAnexos(lista);
+  const anexo = temArquivos('cpArq')
+    ? await subirAnexos('cpArq', 'CONTAS_PAGAR', id, atual)
+    : juntarAnexos(anexosDe(atual));
+  if (anexo === null) return;
   if (recorrente){
     const lote = REC_TMP.map((r,i) => ({aba:'CONTAS_PAGAR', registro: Object.assign({}, comum, {
       ID:uid('cp'), VENCIMENTO:r.venc, VALOR: n(r.valor) ? rd(n(r.valor)) : '',
@@ -8282,8 +8349,12 @@ function resumoItens(){
   const repasses = repassesVencidos
     .filter(c => liberacao(c).tipo !== 'nao')
     .filter(c => !semDadosCP(c))
-    .map(c => ({ord:c.VENCIMENTO, acao:'cp', id:c.ID, del:{tipo:'cp', id:c.ID}, quando:c.VENCIMENTO,
-                quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—', valor:n(c.VALOR)}))
+    .map(c => {
+      const o = categoriaOrigemCP(c);
+      return {ord:c.VENCIMENTO, acao:'cp', id:c.ID, del:{tipo:'cp', id:c.ID}, quando:c.VENCIMENTO,
+              quem:c.FAVORECIDO || '—', oque:c.DESCRICAO || '—', valor:n(c.VALOR),
+              cat:o.cat, sub:o.sub};
+    })
     .sort(antesPrimeiro);
 
   const soma = L => rd(L.reduce((s,x) => s + n(x.valor), 0));
@@ -8315,7 +8386,8 @@ function resumoItens(){
           + (repassesSemConta.length
               ? ' · ' + repassesSemConta.length + ' em faltam dados bancários' : ''),
      tom:repasses.length ? 'n' : '',
-     linhas:repasses, colQuem:'Cliente', colOque:'Descrição', colQuando:'Vencimento'}
+     linhas:repasses, colQuem:'Cliente', colOque:'Descrição', colQuando:'Vencimento',
+     colCat:'Categoria de origem'}
   ];
 }
 
