@@ -125,6 +125,13 @@ th{text-align:left;font-weight:600;font-size:11px;letter-spacing:.04em;color:var
 td{padding:8px 10px;border-bottom:1px solid var(--line2);vertical-align:top}
 tbody tr:hover{background:var(--surface2)}
 tr.grifo{background:var(--brass-l)}
+/* perfil de consulta: os botões que alteram saem da tela; ficam os de ver,
+   exportar, imprimir e fechar (.sec) e a navegação */
+.avisoConsulta{background:var(--brass-l);border:1px solid var(--brass);border-radius:var(--r);
+  padding:9px 14px;margin:-4px 0 14px;font-size:12.5px;color:var(--ink)}
+body.consulta .btn.per,
+body.consulta .btn.ok,
+body.consulta .btn:not(.sec):not(.x){display:none !important}
 /* quadradinho de autoria: quem lançou e quando, ao parar o mouse em cima */
 .selo-aut{display:inline-block;width:11px;height:11px;line-height:11px;margin-left:6px;border-radius:3px;
   border:1px solid var(--line);background:var(--surface2);color:transparent;font-size:1px;
@@ -328,7 +335,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v12.6';
+const VERSAO_APP = 'v12.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -478,7 +485,8 @@ async function salvarAgora(){
 /* ── API ── */
 async function api(payload){
   if (!API_URL || API_URL.indexOf('COLE_AQUI') === 0) throw new Error('Configure a API_URL no index.html antes de usar.');
-  const escrita = ['salvar','salvarLote','excluir','excluirLote','upload'].includes(payload.action);
+  const escrita = ['salvar','salvarLote','excluir','excluirLote','upload','gravar'].includes(payload.action);
+  if (escrita && soLeitura()) throw new Error('Seu perfil é de consulta: não é possível alterar.');
   if (escrita && !navigator.onLine){ NET.erro = 'sem conexão'; pintarNet(); throw new Error('Você está offline. Reconecte para salvar.'); }
   if (escrita){ NET.pendentes++; pintarNet(); }
   try{
@@ -593,6 +601,7 @@ function dataHoraBR(v){
 }
 
 async function salvar(aba, reg, silencio){
+  if (bloqueiaConsulta()) return null;
   // senha nova precisa ir pelo caminho antigo, para o servidor gerar o hash
   if (aba === 'USUARIOS'){
     const j = await api({action:'salvar', aba, registro:reg});
@@ -609,6 +618,7 @@ async function salvar(aba, reg, silencio){
   return reg;
 }
 async function salvarLote(lote){
+  if (bloqueiaConsulta()) return;
   lote.forEach(it => { if (!it.registro.ID) it.registro.ID = uid(); });
   assinarLote(lote);
   await api({action:'gravar', lote});
@@ -672,6 +682,7 @@ async function reenviarPendencias(){
 }
 
 function enfileirar(lote, apagar){
+  if (bloqueiaConsulta()) return Promise.resolve();   // rede: a última trava
   FILA.lote = FILA.lote.concat(lote || []);
   FILA.apagar = FILA.apagar.concat(apagar || []);
   persistirFila();
@@ -725,6 +736,7 @@ function descarregarFila(){
 }
 /* aplica na tela agora e manda para a fila; a interface não espera a nuvem */
 function salvarLoteRapido(lote){
+  if (bloqueiaConsulta()) return Promise.resolve();
   lote.forEach(it => { if (!it.registro.ID) it.registro.ID = uid(); });
   assinarLote(lote);                  // antes de entrar no DB: depois já existiria
   lote.forEach(it => {
@@ -736,6 +748,7 @@ function salvarLoteRapido(lote){
   return enfileirar(lote, []);
 }
 function excluirLoteRapido(apagar){
+  if (bloqueiaConsulta()) return Promise.resolve();
   apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
   invalidarIdx(); render();
   return enfileirar([], apagar);
@@ -765,6 +778,7 @@ window.addEventListener('beforeunload', e => {
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) descarregarFila(); });
 async function excluir(aba, id){
+  if (bloqueiaConsulta()) return;
   DB[aba] = (DB[aba]||[]).filter(x => x.ID !== id);
   return enfileirar([], [{aba, id}]);
 }
@@ -841,6 +855,7 @@ async function entrar(){
     sessionStorage.setItem('fin_user', JSON.stringify(USER));
     $('#login').style.display = 'none'; $('#app').style.display = 'block';
     $('#hdUser').textContent = USER.NOME; $('#hdPerfil').textContent = USER.PERFIL;
+    marcarModoConsulta();
     await carregar();
   }catch(e){ $('#loginErro').innerHTML = '<div class="erro">'+esc(e.message)+'</div>'; }
   finally{ carregandoOff(); }
@@ -906,6 +921,69 @@ const MODULOS = [
   {k:'painel', t:'Painel e DRE', i:'◧'},
   {k:'resumo', t:'Resumo', i:'∑'}
 ];
+/* ══════════════════ PERFIL DE CONSULTA: SÓ LEITURA ══════════════════
+   O perfil CONSULTA não altera nada: não lança, não edita, não exclui, não
+   concilia, não desfaz. O bloqueio fica nos pontos por onde toda gravação
+   passa — assim não depende de esconder botão por botão, e um botão novo que
+   eu esqueça de tratar continua sem conseguir gravar.
+   Isto trava a interface do sistema. Não é segurança contra quem mexa na
+   página: para isso o bloqueio teria de ser no Apps Script, que hoje não
+   recebe quem é o usuário em cada gravação. */
+const soLeitura = () => String((USER && USER.PERFIL) || '').toUpperCase() === 'CONSULTA';
+let AVISOU_CONSULTA = 0;
+function bloqueiaConsulta(){
+  if (!soLeitura()) return false;
+  // um aviso por vez: a ação pode disparar várias gravações em sequência
+  const agora = Date.now();
+  if (agora - AVISOU_CONSULTA > 1200){
+    AVISOU_CONSULTA = agora;
+    toast('Seu perfil é de consulta: você pode ver tudo, mas não alterar.','erro');
+  }
+  return true;
+}
+/* as funções de handler que alteram algo — para o clique não começar uma ação
+   que a gravação vai recusar no fim. A lista é conferida por teste: botão novo
+   que altere e não esteja aqui derruba a suíte. */
+const ACOES_ALTERAM = ['gravarAcesso','gravarCP','gravarCR','gravarComissionado','gravarConta',
+  'gravarExecucao','gravarFavorecido','gravarGeral','gravarGuia','gravarHomolog','gravarLanc',
+  'gravarNaoIdentificado','gravarNovoNaConciliacao','gravarObsMov','gravarPraca','gravarRecebida',
+  'gravarRegra','gravarSenhaMaster','gravarSubcat','gravarSubclasse','gravarUsuario',
+  'apagarDoResumo','apagarReg','apagarSimples','excluirConta','excluirImportAcordos',
+  'excluirImportacao','excluirLanc','excluirReceber','excluirReceberConfirmado',
+  'excluirSelecionadosReceber','executarLimpezaOrfaos','excluirMov',
+  'conciliar','conciliarVariosMovs','ajustarEConciliar','aplicarJuntar','confirmarJuntar',
+  'confirmarVinculos','vincularUm','desfazer','desfazerEVoltar','desconciliarRegistro',
+  'desconciliarLoteTodo','voltarPendente',
+  'marcarExecucao','marcarGuia','marcarHomologacao','alternarSemDados','gravarObsMov',
+  'confirmarImport','confirmarImportAcordos','confirmarImportCP',
+  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','gerarCPComissoes','gerarRec',
+  'addFavorecidoRapido','addSubcat','addSubclasse','removerAnexo','lancarTarifa',
+  'formCP','formCR','formLanc','formNovoNaConciliacao','formObsMov','formRecebida','formAcesso',
+  'formComissionado','formConta','formFavorecido','formPraca','formRegra','formSubcat',
+  'formSubclasse','formUsuario','formImportar','formImportarCP','formImportarAcordos',
+  'formVincularVarios','formJuntarCreditos','escolherManual','editarAntesDeVincular',
+  'marcarNaoIdentificado','painelSemDados'];
+/* liga o modo consulta na tela: o corpo ganha a marca, o CSS esconde os botões
+   que alteram e o cabeçalho avisa o usuário do que ele pode fazer */
+function marcarModoConsulta(){
+  const b2 = document.body;
+  if (b2 && b2.classList) b2.classList[soLeitura() ? 'add' : 'remove']('consulta');
+  const p2 = document.getElementById('hdPerfil');
+  if (p2 && soLeitura()) p2.textContent = 'CONSULTA · só leitura';
+}
+/* trava o clique antes de abrir a ação, no perfil de consulta */
+function travarCliquesConsulta(){
+  document.addEventListener('click', e => {
+    if (!soLeitura()) return;
+    const alvo = e.target && e.target.closest ? e.target.closest('[onclick]') : null;
+    if (!alvo) return;
+    const codigo = String(alvo.getAttribute('onclick') || '');
+    const nome = (codigo.match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/) || [])[1];
+    if (!nome || ACOES_ALTERAM.indexOf(nome) < 0) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    bloqueiaConsulta();
+  }, true);
+}
 /* o usuário só enxerga as abas liberadas para ele; TODAS libera tudo */
 function podeVer(k){
   const abas = String((USER && USER.ABAS) || 'TODAS');
@@ -946,7 +1024,9 @@ function subtabs(itens){
     '<button class="'+((SUB||itens[0][0])===k?'on':'')+'" onclick="SUB=\''+k+'\';render()">'+esc(t)+'</button>').join('') + '</div>';
 }
 function cabec(titulo, sub, acoes){
-  return '<div class="titulo"><div><h2>'+esc(titulo)+'</h2><p>'+esc(sub||'')+'</p></div><div class="acoes">'+(acoes||'')+'</div></div>';
+  return '<div class="titulo"><div><h2>'+esc(titulo)+'</h2><p>'+esc(sub||'')+'</p></div><div class="acoes">'+(acoes||'')+'</div></div>'
+    + (soLeitura() ? '<div class="avisoConsulta">Perfil de <b>consulta</b>: você vê tudo e pode exportar '
+        + 'e imprimir, mas não alterar lançamentos, vincular, conciliar ou excluir.</div>' : '');
 }
 function vazio(t, s){ return '<div class="vazio"><strong>'+esc(t)+'</strong>'+esc(s||'')+'</div>'; }
 function setF(k, v){ FILTROS[k] = v; render(); }
@@ -1189,6 +1269,7 @@ const tarifaPadrao = () => n(cfg('TARIFA_PADRAO','2,50')) || 2.5;
 let CFGABA = 'contas';
 function abrirConfig(aba){
   if (!podeVer('config')) return toast('Seu usuário não tem acesso às configurações.','erro');
+  if (soLeitura()) return toast('Perfil de consulta não abre as configurações.','erro');
   CFGABA = aba || CFGABA;
   const abas = [['contas','Contas bancárias'],['favorecidos','Favorecidos'],['pracas','Praças'],
                 ['subclasses','Categorias'],['subcats','Subcategorias'],['usuarios','Usuários'],
@@ -7860,11 +7941,13 @@ function imprimirRelatorio(titulo, subtitulo, html){
       USER = JSON.parse(s);
       $('#login').style.display = 'none'; $('#app').style.display = 'block';
       $('#hdUser').textContent = USER.NOME; $('#hdPerfil').textContent = USER.PERFIL;
+      marcarModoConsulta();
       carregar();
     }catch(e){ sessionStorage.removeItem('fin_user'); }
   } else {
     setTimeout(()=>{ const e = document.getElementById('lgUser'); if (e) e.focus(); }, 200);
   }
+  travarCliquesConsulta();
 })();
 /* ══════════════════ CONTA CORRENTE ══════════════════
    Todos os movimentos já conciliados, em formato de extrato:
