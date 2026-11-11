@@ -335,7 +335,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v12.7';
+const VERSAO_APP = 'v12.9';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -622,6 +622,7 @@ async function salvarLote(lote){
   lote.forEach(it => { if (!it.registro.ID) it.registro.ID = uid(); });
   assinarLote(lote);
   await api({action:'gravar', lote});
+  recalcularComissoesAuto(lote);
   lote.forEach(it => {
     const lista = DB[it.aba] || (DB[it.aba] = []);
     const i = lista.findIndex(x => x.ID === it.registro.ID);
@@ -745,7 +746,9 @@ function salvarLoteRapido(lote){
     if (i >= 0) L[i] = it.registro; else L.push(it.registro);
   });
   invalidarIdx(); render();
-  return enfileirar(lote, []);
+  const r = enfileirar(lote, []);
+  recalcularComissoesAuto(lote);     // a base mudou? a comissão acompanha
+  return r;
 }
 function excluirLoteRapido(apagar){
   if (bloqueiaConsulta()) return Promise.resolve();
@@ -956,7 +959,7 @@ const ACOES_ALTERAM = ['gravarAcesso','gravarCP','gravarCR','gravarComissionado'
   'desconciliarLoteTodo','voltarPendente',
   'marcarExecucao','marcarGuia','marcarHomologacao','alternarSemDados','gravarObsMov',
   'confirmarImport','confirmarImportAcordos','confirmarImportCP',
-  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','gerarCPComissoes','gerarRec',
+  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','aplicarSoEscritorio','gerarRec',
   'addFavorecidoRapido','addSubcat','addSubclasse','removerAnexo','lancarTarifa',
   'formCP','formCR','formLanc','formNovoNaConciliacao','formObsMov','formRecebida','formAcesso',
   'formComissionado','formConta','formFavorecido','formPraca','formRegra','formSubcat',
@@ -2016,7 +2019,9 @@ function cfgGeral(){
     + '<p class="mini">Passa de uma vez todos os acordos de um percentual para outro — 70% / 30% para 67% / 33%, '
     + 'por exemplo — recalculando as parcelas em aberto e os repasses ainda não pagos. '
     + 'Mostra tudo o que vai mudar antes de aplicar.</p>'
-    + '<div style="margin-top:8px"><button class="btn sec" onclick="verificarRateio()">Mudar o rateio dos acordos</button></div>'
+    + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+    + '<button class="btn sec" onclick="verificarRateio()">Mudar o rateio dos acordos</button>'
+    + '<button class="btn sec" onclick="verificarSoEscritorio()">Corrigir acordos 100% do escritório</button></div>'
     + '<div class="secao-form" style="margin-top:22px">Senha master</div>'
     + '<div class="grade">'
     + '<div class="campo"><label for="cgMaster">Nova senha do usuário master</label>'
@@ -2512,6 +2517,13 @@ function removerParcelaValor(i){
 /* Categoria 100% do escritório: força 0/100, trava os percentuais e desliga a
    tarifa. Roda em todo redesenho das parcelas, então vale igual no lançamento
    novo, na edição e no acordo lançado pela conciliação. */
+/* esconde o campo inteiro — rótulo junto — sem tirá-lo do formulário: o valor
+   continua sendo lido na hora de gravar */
+function mostrarCampo(id, visivel){
+  const e = document.getElementById(id);
+  const box = e && e.closest ? (e.closest('.campo') || e.closest('.check')) : null;
+  if (box && box.style) box.style.display = visivel ? '' : 'none';
+}
 function aplicarRateioEscritorio(){
   const soEsc = ehCatEscritorio(val('lcSub'));
   const cli = document.getElementById('lcPctCli'), esce = document.getElementById('lcPctEsc');
@@ -2524,10 +2536,19 @@ function aplicarRateioEscritorio(){
   }
   if (tar && soEsc){ tar.checked = false; tar.disabled = true; }
   else if (tar && tar.disabled){ tar.disabled = false; tar.checked = true; }
+  /* Não há o que decidir nesta categoria: o rateio é sempre 0 / 100, a tarifa
+     não se aplica e o valor todo já é sucumbência. Campo que só pode ter um
+     valor é campo que confunde, então sai da tela em vez de ficar travado. */
+  ['lcPctCli','lcPctEsc','lcSuc','lcTarifa'].forEach(id => mostrarCampo(id, !soEsc));
+  if (soEsc){
+    const sucE = document.getElementById('lcSuc');
+    if (sucE) sucE.value = '';          // o total inteiro já é do escritório
+  }
   if (aviso) aviso.innerHTML = soEsc
     ? '<p class="mini" style="color:var(--brass);margin:0"><b>'+esc(val('lcSub'))+'</b> é honorário do escritório: '
       + 'o valor vai <b>100% para o escritório</b>, sem rateio e sem repasse ao cliente. '
-      + 'A tarifa bancária fica desligada porque não há parte do cliente de onde descontá-la.</p>'
+      + 'Por isso não há o que digitar em percentuais, sucumbência ou tarifa bancária — '
+      + 'esses campos não se aplicam e ficam fora da tela.</p>'
     : '';
   return soEsc;
 }
@@ -3250,6 +3271,10 @@ function memoriaValores(valor, escSemTarifa, tarifa, sucP){
    No acordo CPC vem digitada na parcela; nos demais sai da sucumbência mais o percentual. */
 function escPrevisto(p, l, valorCreditado){
   const v = rd(n(valorCreditado) || n(p.VALOR));
+  /* Categoria 100% do escritório manda em tudo. Vinha depois do rateio gravado
+     e do valor digitado parcela a parcela, então um acordo lançado como 67/33 e
+     só depois passado para Sucumbência continuava dividindo com o cliente. */
+  if (l && ehCatEscritorio(l.SUBCLASSE)) return v;
   if (String(p.ESC_PREV == null ? '' : p.ESC_PREV).trim() !== ''){
     const base = n(p.VALOR);
     return (base && Math.abs(v - base) > 0.01) ? rd(n(p.ESC_PREV) * v / base) : rd(n(p.ESC_PREV));
@@ -5998,6 +6023,7 @@ function excluirSelecionadosReceber(){ excluirReceber([...SELR]); }
 /* tarifa aplicável a uma parcela (sai do cliente e vai para o escritório) */
 function tarifaDe(p, l){
   if (p.TIPO === 'Sucumbência') return 0;
+  if (l && ehCatEscritorio(l.SUBCLASSE)) return 0;   // não há parte do cliente de onde descontar
   // no acordo CPC a tarifa é marcada parcela por parcela
   if (String(p.TAR_PREV == null ? '' : p.TAR_PREV).trim() !== '') return rd(n(p.TAR_PREV));
   if (!l || l.TARIFA_ATIVA === 'NAO') return 0;
@@ -6843,7 +6869,7 @@ function formCP(id){
     + '<div class="campo full"><label>Código de barras para pagamento</label>'
       + '<div id="boxLinha"></div></div>'
     + (id ? '' :
-        '<div class="check full"><input type="checkbox" id="cpRec" onchange="toggleRec()"><label for="cpRec">Conta recorrente — este favorecido tem boleto todo mês</label></div>'
+        '<div class="check full"><input type="checkbox" id="cpRec" onchange="toggleRec()"><label for="cpRec">Conta parcelada ou recorrente — mais de um vencimento</label></div>'
       + '<div class="full" id="boxRec"></div>')
     + '</div>'
     + (paga ? '' : '<p class="mini" style="margin-top:8px">A conta é dada como paga apenas quando o débito correspondente for conciliado no extrato.</p>'),
@@ -6860,7 +6886,10 @@ function toggleRec(){
   const box = document.getElementById('boxRec');
   if (!val('cpRec')){ box.innerHTML = ''; REC_TMP = []; return; }
   const dia = Number(String(val('cpVenc')).slice(8,10)) || new Date().getDate();
-  box.innerHTML = '<div class="secao-form">Contas recorrentes</div>'
+  box.innerHTML = '<div class="secao-form">Vencimentos desta conta</div>'
+    + '<p class="mini" style="margin:-4px 0 10px">Para a conta de todo mês, gere os meses de uma vez. '
+    + 'Para uma compra parcelada com datas ou valores diferentes, acrescente os vencimentos um a um — '
+    + 'cada linha vira uma conta a pagar.</p>'
     + '<div class="grade" style="margin-bottom:10px">'
     + inp('recDia','Dia do vencimento', dia, '', 'number', 'min="1" max="31" onchange="gerarRec()"')
     + inp('recMeses','Repetir por (meses)', 12, '', 'number', 'min="1" max="600" onchange="gerarRec()"')
@@ -6868,6 +6897,36 @@ function toggleRec(){
     + '<div class="campo"><label>&nbsp;</label><button class="btn sec" onclick="gerarRec()">Gerar meses</button></div>'
     + '</div><div id="tabRec"></div>';
   gerarRec();
+}
+/* Acrescenta um vencimento à mão: um mês depois do último, com o mesmo valor.
+   É o caso da compra parcelada, em que as datas e os valores não seguem a
+   regularidade de "todo dia 10". */
+function addRec(){
+  const ult = REC_TMP[REC_TMP.length - 1];
+  let venc, valor;
+  if (ult){
+    // o dia vem da primeira linha, não da última: a última pode ter sido
+    // empurrada por um fim de semana, e seguir por ela faria a data andar um
+    // pouco a cada parcela
+    const d = new Date(String(ult.venc) + 'T12:00');
+    const dia0 = Number(String(REC_TMP[0].venc).slice(8,10)) || d.getDate();
+    const alvo = new Date(d.getFullYear(), d.getMonth() + 1, 1, 12);
+    const ultimoDia = new Date(alvo.getFullYear(), alvo.getMonth() + 1, 0).getDate();
+    alvo.setDate(Math.min(dia0, ultimoDia));
+    venc = proximoDiaUtil(isoDia(alvo));
+    valor = ult.valor;
+  } else {
+    venc = proximoDiaUtil(val('cpVenc') || hoje());
+    valor = n(val('cpValor')) || '';
+  }
+  REC_TMP.push({venc, valor});
+  pintarRec();
+}
+function removerRec(i){
+  const j = Number(i);
+  if (isNaN(j) || j < 0 || j >= REC_TMP.length) return;
+  REC_TMP.splice(j, 1);
+  pintarRec();
 }
 function gerarRec(){
   const dia = Math.min(31, Math.max(1, parseInt(val('recDia')) || 1));
@@ -6889,16 +6948,23 @@ function gerarRec(){
 }
 function pintarRec(){
   const box = document.getElementById('tabRec'); if (!box) return;
+  const rol = guardarRolagem(['rolRec']);
   const soma = REC_TMP.reduce((s,r) => s + n(r.valor), 0);
   const sem = REC_TMP.filter(r => !n(r.valor)).length;
-  box.innerHTML = '<div class="tw" style="max-height:260px;overflow:auto"><table><thead><tr><th>#</th><th>Vencimento</th><th class="num">Valor (R$)</th><th></th></tr></thead><tbody>'
+  box.innerHTML = '<div class="tw" id="rolRec" style="max-height:260px;overflow:auto"><table><thead><tr><th>#</th><th>Vencimento</th><th class="num">Valor (R$)</th><th></th><th></th></tr></thead><tbody>'
     + REC_TMP.map((r,i) =>
       '<tr><td>'+(i+1)+'</td>'
       + '<td><input type="date" value="'+esc(r.venc)+'" onchange="REC_TMP['+i+'].venc=this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:4px"></td>'
       + '<td class="num"><input value="'+(n(r.valor)?nMoeda(r.valor):'')+'" placeholder="em branco" oninput="REC_TMP['+i+'].valor=this.value" onblur="pintarRec()" style="width:110px;text-align:right;padding:4px 6px;border:1px solid var(--line);border-radius:4px;font-family:\'IBM Plex Mono\',monospace"></td>'
-      + '<td>'+(n(r.valor) ? '' : '<span class="tag t-pend">boleto não recebido</span>')+'</td></tr>').join('')
-    + '</tbody><tfoot><tr><th colspan="2" style="text-align:right">Total informado</th><th class="num">'+nMoeda(soma)+'</th><th class="mini">'+sem+' sem valor</th></tr></tfoot></table></div>'
-    + '<p class="mini" style="margin-top:6px">Deixe o valor em branco nos meses em que o boleto ainda não chegou. Essas contas ficam marcadas como "boleto não recebido" e podem ser preenchidas depois.</p>';
+      + '<td>'+(n(r.valor) ? '' : '<span class="tag t-pend">boleto não recebido</span>')+'</td>'
+      + '<td style="text-align:right"><button class="btn sm sec" title="Tirar este vencimento" '
+        + 'onclick="removerRec('+i+')">×</button></td></tr>').join('')
+    + '</tbody><tfoot><tr><th colspan="2" style="text-align:right">Total informado</th><th class="num">'+nMoeda(soma)+'</th><th class="mini" colspan="2">'+sem+' sem valor</th></tr></tfoot></table></div>'
+    + '<div style="margin-top:8px"><button class="btn sec" onclick="addRec()">+ Acrescentar vencimento</button></div>'
+    + '<p class="mini" style="margin-top:6px"><b>'+REC_TMP.length+'</b> conta(s) a pagar serão criadas, uma por linha. '
+    + 'Deixe o valor em branco nos meses em que o boleto ainda não chegou. Essas contas ficam marcadas como '
+    + '"boleto não recebido" e podem ser preenchidas depois.</p>';
+  devolverRolagem(rol);
 }
 async function gravarCP(id){
   const recorrente = !id && val('cpRec') && REC_TMP.length;
@@ -7140,19 +7206,15 @@ function telaComissoes(){
     + coms.map(c => '<th class="num">'+nMoeda(recs.reduce((s,r)=>s+n((r.itens.find(x=>x.COMISSIONADO_ID===c.ID)||{}).VALOR),0))+'</th>').join('')
     + '</tr></tfoot>' : '';
 
-  // o mesmo critério de gerarCPComissoes: contar diferente do que a ação faz
-  // dava um botão que prometia um número e executava outro
-  const aEnviar = (DB.COMISSOES||[]).filter(c => c.STATUS !== 'Paga' && !c.CP_ID);
-  const foraDoFiltro = mes ? aEnviar.filter(c => mesDe(c.DATA) !== mes).length : 0;
-  return cabec('Comissões', 'Base de cálculo: a parte do escritório sem a tarifa bancária.',
+  /* O envio para contas a pagar saiu: a comissão entra na folha de pagamento,
+     junto do salário, então uma conta a pagar separada duplicaria o valor.
+     Esta tela é o relatório do que cada um tem a receber no período. */
+  return cabec('Comissões', 'Base de cálculo: a parte do escritório sem a tarifa bancária. '
+      + 'O pagamento sai na folha — por isso não há envio para contas a pagar.',
       '<button class="btn sec" onclick="abrirConfig(\'regras\')">Comissionados e regras</button>'
     + '<button class="btn sec" onclick="verificarComissoes()">Atualizar pelas regras</button>'
     + '<button class="btn sec" onclick="imprimirComissoes()">Imprimir / PDF</button>'
-    + '<button class="btn sec" onclick="exportarComissoes()">Exportar Excel</button>'
-    + (aEnviar.length ? '<button class="btn" onclick="gerarCPComissoes()" title="'
-        + (foraDoFiltro ? foraDoFiltro + ' delas são de outros meses — o envio não respeita o filtro de mês'
-                        : 'todas as comissões pendentes de envio')
-        + '">Enviar '+aEnviar.length+' para contas a pagar</button>' : ''))
+    + '<button class="btn sec" onclick="exportarComissoes()">Exportar Excel</button>')
     + avisoComissoesPendentes()
     + '<div class="kpis">'
     + kpi('Total das comissões', moeda(rd(dc.totais.porCom.reduce((a,b) => a + b, 0))),
@@ -7166,28 +7228,6 @@ function telaComissoes(){
       ? '<div class="card"><div class="tw fixa"><table><thead>'+cabecalho+'</thead><tbody>'+linhas+'</tbody>'+rodape+'</table></div></div>'
       : '<div class="card">'+vazio('Nenhum comissionado cadastrado','Cadastre os comissionados e as regras por categoria na engrenagem, em Regras de comissão.')+'</div>');
 }
-async function gerarCPComissoes(){
-  const pend = (DB.COMISSOES||[]).filter(c => c.STATUS !== 'Paga' && !c.CP_ID);
-  if (!pend.length) return toast('Nenhuma comissão pendente de envio.','erro');
-  const mesF = FILTROS.fMesC || '';
-  const fora = mesF ? pend.filter(c => mesDe(c.DATA) !== mesF).length : 0;
-  if (!confirm('Gerar ' + pend.length + ' conta(s) a pagar de comissão?'
-    + (fora ? '\n\nAtenção: ' + fora + ' delas são de outros meses. O envio pega todas as comissões '
-            + 'pendentes, não só as do mês filtrado na tela.' : ''))) return;
-  const lote = [];
-  pend.forEach(c => {
-    const cpId = uid('cp');
-    lote.push({aba:'CONTAS_PAGAR', registro:{ID:cpId, DESCRICAO:'Comissão — '+(c.CLIENTE||''),
-      FAVORECIDO:nomeComissionado(c.COMISSIONADO_ID), CATEGORIA:'Comissão', VENCIMENTO:c.DATA || hoje(),
-      VALOR:n(c.VALOR), STATUS:'Em aberto', DATA_PGTO:'', ORIGEM:'Comissão automática', PARCELA_ID:c.PARCELA_ID,
-      ANEXO_URL:'', OBS:nMoeda(c.PCT)+'% sobre '+moeda(c.BASE)}});
-    lote.push({aba:'COMISSOES', registro: Object.assign({}, c, {CP_ID:cpId, STATUS:'Enviada'})});
-  });
-  carregandoOn('Gerando contas a pagar…');
-  try{ await salvarLote(lote); render(); toast(pend.length+' comissão(ões) enviada(s) para contas a pagar.','ok'); }
-  catch(e){ toast(e.message,'erro'); } finally{ carregandoOff(); }
-}
-
 /* ══════════════════ PAINEL E DRE ══════════════════ */
 /* Apura um mês de um grupo. Categorias sem grupo formam o DRE do escritório;
    categorias com grupo preenchido formam um DRE próprio. */
@@ -8717,6 +8757,128 @@ function planoRateio(cliDe, cliPara){
   return {lancs, itens, pulados, cliDe:n(cliDe), cliPara:n(cliPara), escDe, escPara};
 }
 
+/* ══ Corrigir acordos 100% do escritório já lançados ══════════════════════
+   Acordo que só depois virou Sucumbência (ou outra categoria 100% do
+   escritório) ficou com o rateio antigo gravado: a parcela recebida guarda o
+   valor do cliente congelado da conciliação, e o repasse continua em contas a
+   pagar. Isto encontra esses casos e acerta — mostrando tudo antes. */
+function planoSoEscritorio(){
+  const itens = [], pulados = [], lancs = [];
+  const igual = (a,b) => Math.abs(n(a) - n(b)) < 0.005;
+
+  (DB.LANCAMENTOS||[]).filter(l => ehCatEscritorio(l.SUBCLASSE)).forEach(l => {
+    const quem = (l.PASTA ? l.PASTA + ' · ' : '') + (l.CLIENTE || '—');
+    // o próprio acordo: rateio e tarifa passam para a regra da categoria
+    if (!igual(l.PCT_ESCRITORIO, 100) || !igual(l.PCT_CLIENTE, 0) || l.TARIFA_ATIVA !== 'NAO')
+      lancs.push(Object.assign({}, l, {PCT_CLIENTE:0, PCT_ESCRITORIO:100, TARIFA_ATIVA:'NAO'}));
+
+    (DB.PARCELAS||[]).filter(p => p.LANC_ID === l.ID).forEach(p => {
+      const oque = p.TIPO + (n(p.NUM) > 0 ? ' ' + n(p.NUM) : '');
+      const recebida = p.STATUS === 'Recebida';
+      const v = rd(recebida ? (n(p.VALOR_CREDITADO) || n(p.VALOR)) : n(p.VALOR));
+      const cliAnt = recebida ? rd(n(p.VALOR_CLIENTE)) : rd(v - escPrevisto(p, l) - tarifaDe(p, l));
+      const escAnt = recebida ? rd(n(p.VALOR_ESCRITORIO)) : rd(escPrevisto(p, l));
+      const tarAnt = recebida ? rd(n(p.TARIFA)) : rd(tarifaDe(p, l));
+
+      const cp = (DB.CONTAS_PAGAR||[]).find(c => c.ID === p.CP_ID)
+              || (DB.CONTAS_PAGAR||[]).find(c => c.PARCELA_ID === p.ID && c.CATEGORIA === 'Repasse a cliente');
+      if (cp && cp.STATUS === 'Pago')
+        return pulados.push({quem, oque, valor:v, cliAnt,
+          motivo:'o repasse de ' + moeda(cp.VALOR) + ' ao cliente já foi pago'});
+
+      const limpaPrev = String(p.ESC_PREV == null ? '' : p.ESC_PREV).trim() !== ''
+                     || String(p.TAR_PREV == null ? '' : p.TAR_PREV).trim() !== '';
+      if (igual(cliAnt, 0) && igual(escAnt, v) && igual(tarAnt, 0) && !cp && !limpaPrev) return;
+
+      const regs = [], apagar = [];
+      const novaP = Object.assign({}, p, {ESC_PREV:'', TAR_PREV:'', CP_ID:''});
+      if (recebida){ novaP.VALOR_CLIENTE = 0; novaP.VALOR_ESCRITORIO = v; novaP.TARIFA = 0; }
+      regs.push({aba:'PARCELAS', registro: novaP});
+      if (cp) apagar.push({aba:'CONTAS_PAGAR', id:cp.ID});
+
+      itens.push({quem, oque, venc:p.VENCIMENTO, valor:v, recebida,
+                  cliAnt, escAnt:rd(escAnt + tarAnt), cliNov:0, escNov:v,
+                  repasse: cp ? rd(n(cp.VALOR)) : 0, regs, apagar});
+    });
+  });
+  return {lancs, itens, pulados};
+}
+function verificarSoEscritorio(){
+  const p = planoSoEscritorio();
+  const ganho = rd(p.itens.reduce((s,i) => s + (i.escNov - i.escAnt), 0));
+  const corpo = '<p class="mini">Procura acordos de categoria <b>100% do escritório</b> — '
+    + esc(catsEscritorio().length ? cfg('CATEGORIAS_ESCRITORIO', CATS_ESCRITORIO_PADRAO) : 'Sucumbência')
+    + ' — que ficaram com rateio, tarifa ou repasse ao cliente de quando eram outra categoria.</p>'
+    + (!p.itens.length && !p.lancs.length
+      ? vazio('Nada a corrigir', 'Todos os acordos dessas categorias já estão 100% do escritório.')
+      : '<div class="kpis" style="margin:14px 0 10px">'
+        + kpi('Acordos', p.lancs.length, 'com o rateio a acertar', 'b')
+        + kpi('Parcelas', p.itens.length, 'com valor a corrigir', 'd')
+        + kpi('Vai para o escritório', moeda(ganho), 'a mais do que está hoje', 'p')
+        + '</div>'
+        + (!p.itens.length ? '' :
+          '<div class="tw" style="max-height:320px;overflow:auto"><table class="densa"><thead><tr>'
+          + '<th>Pasta / cliente</th><th>Parcela</th><th>Situação</th><th class="num">Valor</th>'
+          + '<th class="num">Escritório hoje</th><th class="num">Passa a ser</th>'
+          + '<th class="num">Repasse que sai</th></tr></thead><tbody>'
+          + p.itens.map(i => '<tr><td>'+esc(i.quem)+'</td><td>'+esc(i.oque)+'</td>'
+            + '<td>'+(i.recebida ? '<span class="tag t-ok">recebida</span>'
+                                 : '<span class="tag t-pend">em aberto</span>')+'</td>'
+            + '<td class="num">'+nMoeda(i.valor)+'</td>'
+            + '<td class="num neg">'+nMoeda(i.escAnt)+'</td>'
+            + '<td class="num pos">'+nMoeda(i.escNov)+'</td>'
+            + '<td class="num">'+(i.repasse ? nMoeda(i.repasse) : '—')+'</td></tr>').join('')
+          + '</tbody></table></div>')
+        + (!p.pulados.length ? '' :
+          '<div class="secao-form" style="margin-top:18px">Fora da correção</div>'
+          + '<div class="tw" style="max-height:180px;overflow:auto"><table class="densa"><thead><tr>'
+          + '<th>Pasta / cliente</th><th>Parcela</th><th class="num">Valor</th><th>Motivo</th>'
+          + '</tr></thead><tbody>'
+          + p.pulados.map(i => '<tr><td>'+esc(i.quem)+'</td><td>'+esc(i.oque)+'</td>'
+            + '<td class="num">'+nMoeda(i.valor)+'</td><td class="mini">'+esc(i.motivo)+'</td></tr>').join('')
+          + '</tbody></table></div>'
+          + '<p class="mini" style="margin-top:6px">Repasse já pago não é desfeito por aqui: o dinheiro saiu '
+          + 'da conta. Se foi pago por engano, desfaça a conciliação do débito antes.</p>')
+        + '<p class="mini" style="margin-top:10px">A parcela recebida passa a ter <b>o valor inteiro para o '
+        + 'escritório</b>, sem parte do cliente e sem tarifa, e o repasse em aberto é excluído. As comissões '
+        + 'não são recalculadas aqui — depois disto, use <b>Atualizar comissões pelas regras</b>.</p>');
+
+  modal('Corrigir acordos 100% do escritório', corpo,
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + (p.itens.length || p.lancs.length
+       ? '<button class="btn" onclick="aplicarSoEscritorio()">Corrigir '+p.itens.length+' parcela(s)</button>' : ''),
+    'larga');
+}
+async function aplicarSoEscritorio(){
+  const p = planoSoEscritorio();
+  if (!p.itens.length && !p.lancs.length) return toast('Nada a corrigir.','ok');
+  const comRepasse = p.itens.filter(i => i.repasse).length;
+  if (!confirm('Corrigir ' + p.itens.length + ' parcela(s) de ' + p.lancs.length + ' acordo(s)?\n\n'
+    + 'O valor passa a ser 100% do escritório, sem tarifa.'
+    + (comRepasse ? '\n' + comRepasse + ' repasse(s) ao cliente ainda em aberto serão excluídos.' : '')
+    + '\n\nRepasses já pagos não são alterados.')) return;
+  fecharModal();
+
+  const lote = p.lancs.map(l => ({aba:'LANCAMENTOS', registro:l}));
+  const apagar = [];
+  p.itens.forEach(i => { i.regs.forEach(r => lote.push(r)); i.apagar.forEach(a => apagar.push(a)); });
+
+  carregandoOn('Corrigindo ' + p.itens.length + ' parcela(s)…');
+  try{
+    lote.forEach(it => {
+      const L = DB[it.aba] || (DB[it.aba] = []);
+      const j = L.findIndex(x => x.ID && x.ID === it.registro.ID);
+      if (j >= 0) L[j] = it.registro; else if (it.registro.ID) L.push(it.registro);
+    });
+    apagar.forEach(a => { DB[a.aba] = (DB[a.aba]||[]).filter(x => x.ID !== a.id); });
+    invalidarIdx(); render();
+    if (lote.length) await salvarLote(lote);
+    if (apagar.length) await excluirLoteRapido(apagar);
+    toast(p.itens.length + ' parcela(s) corrigida(s) para 100% do escritório'
+      + (comRepasse ? ' · ' + comRepasse + ' repasse(s) excluído(s)' : '') + '.','ok');
+  }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
+}
+
 function verificarRateio(cliDe, cliPara){
   const de = cliDe == null ? 70 : n(cliDe), para = cliPara == null ? 67 : n(cliPara);
   const p = planoRateio(de, para);
@@ -8840,8 +9002,8 @@ function avisoComissoesPendentes(){
   if (p.foraPraca) partes.push('<b>' + p.foraPraca + '</b> com regra barrada pela praça');
   return '<div class="card" style="border-left:3px solid var(--brass)"><div class="corpo">'
     + '<p class="mini" style="margin:0">' + partes.join(' · ') + '. '
-    + 'A comissão é gerada na conciliação do crédito, então uma regra criada ou alterada depois não alcança '
-    + 'sozinha o que já foi recebido. '
+    + 'O recálculo roda sozinho a cada mudança de valor ou de regra; o que sobra aqui é o que ele não pôde '
+    + 'mexer — comissão já paga ou já enviada — ou o que veio de outro computador. '
     + '<button class="btn sm" style="margin-left:6px" onclick="verificarComissoes()">Ver e atualizar</button>'
     + '</p></div></div>';
 }
@@ -8934,6 +9096,51 @@ function planoComissoes(){
   return {criar:criar.sort(porData), alterar:alterar.sort(porData),
           travadas:travadas.sort(porData), semRegra:semRegra.sort(porData),
           foraPraca:foraPraca.sort(porData), semBase:semBase.sort(porData)};
+}
+
+/* ══ Recálculo automático das comissões ══════════════════════════════════
+   A comissão nasce na conciliação, a partir do valor que ficou para o
+   escritório. Mudar o valor depois — corrigir o acordo, acertar o rateio,
+   ajustar o valor na conciliação — deixava a comissão com a base velha, e só
+   o botão "Atualizar pelas regras" acertava.
+
+   Agora o recálculo roda sozinho em cima de qualquer gravação que mexa na
+   base. Fica num ponto só, por onde toda gravação passa, para não depender de
+   eu lembrar de chamá-lo em cada tela nova.
+
+   O que ele NÃO mexe: comissão já paga ou já enviada para contas a pagar —
+   essas o planoComissoes devolve em "travadas", e elas são avisadas em vez de
+   reescritas, porque o dinheiro já tem destino. */
+const ABAS_BASE_COM = {PARCELAS:1, LANCAMENTOS:1, CONTAS_RECEBER:1,
+                       REGRAS_COMISSAO:1, COMISSIONADOS:1};
+let RECALC_COM = 0;
+function recalcularComissoesAuto(lote){
+  if (RECALC_COM) return;                       // já estamos dentro de um recálculo
+  if (soLeitura()) return;
+  if (!(lote||[]).some(it => it && ABAS_BASE_COM[it.aba])) return;
+  // operação em massa tem a ferramenta própria, com prévia: não recalcula peça
+  // por peça nem roda o plano inteiro a cada pedaço
+  if ((lote||[]).length > 200) return;
+
+  RECALC_COM = 1;
+  try{
+    const p = planoComissoes();
+    const ajustes = p.criar.concat(p.alterar).map(i => i.reg);
+    // só conta como travada a que de fato mudaria de valor: senão todo acerto
+    // num sistema com comissões já pagas viraria um aviso sem assunto
+    const travadas = p.travadas.filter(t => Math.abs(n(t.de) - n(t.valor)) > 0.005).length;
+    if (!ajustes.length && !travadas) return;
+    if (ajustes.length) salvarLoteRapido(ajustes);
+    toast(descreveRecalculo(p.criar.length, p.alterar.length, travadas), travadas ? 'erro' : 'ok');
+  }catch(e){ /* o recálculo nunca derruba a gravação que o disparou */ }
+  finally{ RECALC_COM = 0; }
+}
+function descreveRecalculo(criadas, alteradas, travadas){
+  const partes = [];
+  if (criadas) partes.push(criadas + ' comissão(ões) incluída(s)');
+  if (alteradas) partes.push(alteradas + ' recalculada(s)');
+  return 'Comissões: ' + (partes.join(' e ') || 'nada a mudar') + '.'
+    + (travadas ? ' ' + travadas + ' não mudou/mudaram: já paga(s) ou já enviada(s) para contas a pagar.' : '');
 }
 
 /* Quantas comissões as regras de hoje determinam e ainda não existem.
