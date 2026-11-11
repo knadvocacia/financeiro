@@ -346,7 +346,7 @@ table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v13.5';
+const VERSAO_APP = 'v13.6';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -970,7 +970,7 @@ const ACOES_ALTERAM = ['gravarAcesso','gravarCP','gravarCR','gravarComissionado'
   'desconciliarLoteTodo','voltarPendente',
   'marcarExecucao','marcarGuia','marcarHomologacao','alternarSemDados','gravarObsMov',
   'confirmarImport','confirmarImportAcordos','confirmarImportCP',
-  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','aplicarSoEscritorio','gerarRec',
+  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','aplicarSoEscritorio','aplicarMoverCategoria','gerarRec',
   'addFavorecidoRapido','addSubcat','addSubclasse','removerAnexo','lancarTarifa',
   'formCP','formCR','formLanc','formNovoNaConciliacao','formObsMov','formRecebida','formAcesso',
   'formComissionado','formConta','formFavorecido','formPraca','formRegra','formSubcat',
@@ -2066,6 +2066,11 @@ function cfgGeral(){
     + '<p class="mini">Passa de uma vez todos os acordos de um percentual para outro — 70% / 30% para 67% / 33%, '
     + 'por exemplo — recalculando as parcelas em aberto e os repasses ainda não pagos. '
     + 'Mostra tudo o que vai mudar antes de aplicar.</p>'
+    + '<div class="secao-form" style="margin-top:22px">Juntar categorias</div>'
+    + '<p class="mini">Passa todos os lançamentos de uma categoria para outra e apaga a que ficou vazia. '
+    + 'Serve para consertar categoria criada errada — Gestor, Recepcionista — que na verdade é um detalhe '
+    + 'de outra, como Folha de pagamento. Dá para guardar o nome antigo como subcategoria.</p>'
+    + '<div style="margin-top:8px"><button class="btn sec" onclick="verificarMoverCategoria()">Juntar categorias</button></div>'
     + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
     + '<button class="btn sec" onclick="verificarRateio()">Mudar o rateio dos acordos</button>'
     + '<button class="btn sec" onclick="verificarSoEscritorio()">Corrigir acordos 100% do escritório</button></div>'
@@ -9037,6 +9042,141 @@ async function aplicarSoEscritorio(){
     if (apagar.length) await excluirLoteRapido(apagar);
     toast(p.itens.length + ' parcela(s) corrigida(s) para 100% do escritório'
       + (comRepasse ? ' · ' + comRepasse + ' repasse(s) excluído(s)' : '') + '.','ok');
+  }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
+}
+
+/* ══ Juntar categorias ═══════════════════════════════════════════════════
+   Categoria criada errada — "Gestor", "Recepcionista" — que na verdade é um
+   detalhe de outra. Isto passa todos os lançamentos de uma categoria para
+   outra de uma vez e, se quiser, guarda o nome antigo como subcategoria, para
+   o detalhe não se perder. Depois apaga a categoria esvaziada.
+   Mostra tudo antes: é mudança em massa e não tem como desfazer num clique. */
+function planoMoverCategoria(de, para, virarSub){
+  const vazio2 = {de, para, itens:[], total:0, regs:[], lanc:0, rec:0, pag:0, regras:0, subs:0};
+  if (!de || !para || mesmaCategoria(de, para)) return vazio2;
+  const p = Object.assign({}, vazio2, {itens:[], regs:[]});
+  const guardaSub = r => virarSub && !String(r.SUBCATEGORIA||'').trim() ? {SUBCATEGORIA:de} : {};
+
+  (DB.LANCAMENTOS||[]).filter(l => mesmaCategoria(l.SUBCLASSE, de)).forEach(l => {
+    p.lanc++;
+    p.regs.push({aba:'LANCAMENTOS', registro: Object.assign({}, l, {SUBCLASSE:para}, guardaSub(l))});
+  });
+  (DB.CONTAS_RECEBER||[]).filter(c => mesmaCategoria(c.CATEGORIA, de)).forEach(c => {
+    p.rec++; p.total = rd(p.total + n(c.VALOR));
+    p.regs.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, c, {CATEGORIA:para}, guardaSub(c))});
+  });
+  (DB.CONTAS_PAGAR||[]).filter(c => mesmaCategoria(c.CATEGORIA, de)).forEach(c => {
+    p.pag++; p.total = rd(p.total + n(c.VALOR));
+    p.regs.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {CATEGORIA:para}, guardaSub(c))});
+  });
+  // as regras de comissão apontam para o nome da categoria: vão junto
+  (DB.REGRAS_COMISSAO||[]).filter(r => mesmaCategoria(r.SUBCLASSE, de)).forEach(r => {
+    p.regras++;
+    p.regs.push({aba:'REGRAS_COMISSAO', registro: Object.assign({}, r, {SUBCLASSE:para})});
+  });
+  // subcategorias cadastradas sob a categoria antiga passam para a nova
+  (DB.SUBCATEGORIAS||[]).filter(x => mesmaCategoria(x.CATEGORIA, de)).forEach(x => {
+    p.subs++;
+    p.regs.push({aba:'SUBCATEGORIAS', registro: Object.assign({}, x, {CATEGORIA:para})});
+  });
+  p.itens = [
+    {oque:'Lançamentos (acordos)', n:p.lanc},
+    {oque:'Contas a receber', n:p.rec},
+    {oque:'Contas a pagar', n:p.pag},
+    {oque:'Regras de comissão', n:p.regras},
+    {oque:'Subcategorias cadastradas', n:p.subs}
+  ].filter(x => x.n);
+  return p;
+}
+function verificarMoverCategoria(de, para){
+  const cats = (DB.SUBCLASSES||[]).map(c => c.NOME)
+    .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
+  const d = de == null ? (FILTROS.mvDe || '') : de;
+  const a2 = para == null ? (FILTROS.mvPara || '') : para;
+  FILTROS.mvDe = d; FILTROS.mvPara = a2;
+  const tipoDe = (DB.SUBCLASSES||[]).find(c => c.NOME === d);
+  // destino só entre categorias do mesmo tipo: juntar crédito com débito
+  // trocaria o sinal dos lançamentos sem ninguém perceber
+  const destinos = cats.filter(c => c !== d
+    && (!tipoDe || ehDebitoCat((DB.SUBCLASSES||[]).find(x => x.NOME === c) || {}) === ehDebitoCat(tipoDe)));
+  const sub = FILTROS.mvSub == null ? true : !!FILTROS.mvSub;
+  const p = planoMoverCategoria(d, a2, sub);
+
+  const campos = '<div class="grade" style="margin-bottom:12px">'
+    + sel('mvDe','Categoria a esvaziar', [['','— selecione —']].concat(cats.map(c => [c,c])), d, '',
+        'onchange="FILTROS.mvDe=this.value;FILTROS.mvPara=\'\';verificarMoverCategoria()"')
+    + sel('mvPara','Passar tudo para', [['','— selecione —']].concat(destinos.map(c => [c,c])), a2, '',
+        'onchange="FILTROS.mvPara=this.value;verificarMoverCategoria()"')
+    + '</div>'
+    + '<div class="check"><input type="checkbox" id="mvSub"'+(sub?' checked':'')
+      + ' onchange="FILTROS.mvSub=this.checked;verificarMoverCategoria()">'
+      + '<label for="mvSub">Guardar <b>'+esc(d||'a categoria antiga')+'</b> como subcategoria dos lançamentos movidos'
+      + '</label></div>'
+    + '<p class="mini" style="margin:6px 0 0">Assim o detalhe não se perde: o lançamento passa a ser '
+    + esc(a2 || 'a nova categoria') + ' com a subcategoria ' + esc(d || 'antiga')
+    + '. Lançamento que já tem subcategoria não é mexido.</p>';
+
+  const corpo = campos + (!d || !a2
+    ? vazio('Escolha as duas categorias', 'A da esquerda fica vazia; tudo passa para a da direita.')
+    : !p.regs.length
+      ? vazio('Nada para mover', 'Não há lançamento nenhum em ' + d + '.')
+      : '<div class="kpis" style="margin:14px 0 10px">'
+        + kpi('Registros a mover', p.regs.length, 'de ' + esc(d) + ' para ' + esc(a2), 'd')
+        + kpi('Valor envolvido', moeda(p.total), 'contas a pagar e a receber', 'p')
+        + '</div>'
+        + '<div class="tw"><table class="densa"><thead><tr><th>Onde</th><th class="num">Registros</th>'
+        + '</tr></thead><tbody>'
+        + p.itens.map(i => '<tr><td>'+esc(i.oque)+'</td><td class="num">'+i.n+'</td></tr>').join('')
+        + '</tbody></table></div>'
+        + '<p class="mini" style="margin-top:10px">Os valores não mudam — só o nome da categoria. '
+        + 'Depois de mover, <b>' + esc(d) + '</b> fica sem nenhum lançamento e pode ser apagada.</p>');
+
+  modal('Juntar categorias', corpo,
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + (p.regs.length
+       ? '<button class="btn" onclick="aplicarMoverCategoria()">Mover '+p.regs.length+' registro(s)</button>' : ''),
+    'larga');
+}
+async function aplicarMoverCategoria(){
+  const de = FILTROS.mvDe, para = FILTROS.mvPara;
+  const sub = FILTROS.mvSub == null ? true : !!FILTROS.mvSub;
+  const p = planoMoverCategoria(de, para, sub);
+  if (!p.regs.length) return toast('Nada para mover.','erro');
+  const apagarCat = confirm('Mover ' + p.regs.length + ' registro(s) de "' + de + '" para "' + para + '"?'
+    + (sub ? '\n\n"' + de + '" fica como subcategoria nos lançamentos que não tinham uma.' : '')
+    + '\n\nOK para mover e apagar a categoria "' + de + '" em seguida.'
+    + '\nCancelar para não fazer nada.');
+  if (!apagarCat) return;
+  fecharModal();
+
+  carregandoOn('Movendo ' + p.regs.length + ' registro(s)…');
+  // aplica aqui primeiro e só depois envia: a tela responde na hora, como no
+  // resto do sistema, em vez de esperar a ida e volta da nuvem
+  p.regs.forEach(it => {
+    const L = DB[it.aba] || (DB[it.aba] = []);
+    const j = L.findIndex(x => x.ID === it.registro.ID);
+    if (j >= 0) L[j] = it.registro; else L.push(it.registro);
+  });
+  invalidarIdx();
+
+  // a categoria só é apagada quando nada mais aponta para ela
+  const sobra = planoMoverCategoria(de, para, sub).regs.length;
+  const cat = (DB.SUBCLASSES||[]).find(c => c.NOME === de);
+  const apagar = (!sobra && cat) ? [{aba:'SUBCLASSES', id:cat.ID}] : [];
+  if (apagar.length){
+    DB.SUBCLASSES = (DB.SUBCLASSES||[]).filter(c => c.ID !== cat.ID);
+    invalidarIdx();
+  }
+  toast(p.regs.length + ' registro(s) movido(s) para "' + para + '"'
+    + (apagar.length ? ' · categoria "' + de + '" apagada.'
+                     : '. A categoria "' + de + '" não foi apagada'
+                       + (sobra ? ' — ainda há registros nela' : '') + '.'),'ok');
+  FILTROS.mvDe = ''; FILTROS.mvPara = '';
+  render();
+
+  try{
+    await salvarLote(p.regs);
+    if (apagar.length) await excluirLoteRapido(apagar);
   }catch(e){ toast(e.message,'erro'); await carregar(); } finally{ carregandoOff(); }
 }
 
