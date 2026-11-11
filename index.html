@@ -232,6 +232,12 @@ table.densa .btn.sm{padding:2px 8px;font-size:11px}
 .modal .corpo{padding:20px;max-height:70vh;overflow-y:auto}
 .modal .rodape{padding:13px 20px;border-top:1px solid var(--line2);display:flex;gap:9px;justify-content:flex-end;background:var(--surface2);border-radius:0 0 9px 9px}
 .grade{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+/* juntar categorias: a lista de origens rola dentro do quadro para caber
+   dezenas de categorias sem empurrar o resto do modal para fora da tela */
+.gradeMover{display:grid;grid-template-columns:minmax(200px,1fr) minmax(220px,1.1fr);gap:14px}
+.listaCats{max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:var(--r);padding:6px 10px;background:#fff}
+.listaCats .check{padding:3px 0}
+@media (max-width:720px){ .gradeMover{grid-template-columns:1fr} }
 .grade .full{grid-column:1/-1}
 .secao-form{font-size:11px;letter-spacing:.07em;color:var(--ink3);font-weight:600;grid-column:1/-1;padding-top:6px;border-top:1px solid var(--line2);margin-top:4px;text-transform:uppercase}
 .check{display:flex;align-items:center;gap:8px;font-size:13px;padding-top:20px}
@@ -346,7 +352,7 @@ table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v13.6';
+const VERSAO_APP = 'v13.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -9051,32 +9057,50 @@ async function aplicarSoEscritorio(){
    outra de uma vez e, se quiser, guarda o nome antigo como subcategoria, para
    o detalhe não se perder. Depois apaga a categoria esvaziada.
    Mostra tudo antes: é mudança em massa e não tem como desfazer num clique. */
+/* Aceita uma categoria ou várias de uma vez. Com várias, cada registro guarda
+   o nome da SUA categoria de origem como subcategoria — não o da primeira da
+   lista —, senão juntar Gestor e Recepcionista perderia justamente a diferença
+   entre os dois. */
 function planoMoverCategoria(de, para, virarSub){
-  const vazio2 = {de, para, itens:[], total:0, regs:[], lanc:0, rec:0, pag:0, regras:0, subs:0};
-  if (!de || !para || mesmaCategoria(de, para)) return vazio2;
-  const p = Object.assign({}, vazio2, {itens:[], regs:[]});
-  const guardaSub = r => virarSub && !String(r.SUBCATEGORIA||'').trim() ? {SUBCATEGORIA:de} : {};
+  const fontes = (Array.isArray(de) ? de : [de]).map(x => String(x||'').trim()).filter(Boolean)
+    .filter(x => !mesmaCategoria(x, para));
+  const p = {de:fontes, para, itens:[], porCat:[], total:0, regs:[],
+             lanc:0, rec:0, pag:0, regras:0, subs:0};
+  if (!fontes.length || !para) return p;
+  const daFonte = nome => fontes.find(f => mesmaCategoria(f, nome));
+  const guardaSub = (r, origem) =>
+    virarSub && !String(r.SUBCATEGORIA||'').trim() ? {SUBCATEGORIA:origem} : {};
+  const conta = {};
+  const marca = (origem, valor) => {
+    conta[origem] = conta[origem] || {cat:origem, n:0, valor:0};
+    conta[origem].n++; conta[origem].valor = rd(conta[origem].valor + (valor||0));
+  };
 
-  (DB.LANCAMENTOS||[]).filter(l => mesmaCategoria(l.SUBCLASSE, de)).forEach(l => {
-    p.lanc++;
-    p.regs.push({aba:'LANCAMENTOS', registro: Object.assign({}, l, {SUBCLASSE:para}, guardaSub(l))});
+  (DB.LANCAMENTOS||[]).forEach(l => {
+    const o = daFonte(l.SUBCLASSE); if (!o) return;
+    p.lanc++; marca(o, 0);
+    p.regs.push({aba:'LANCAMENTOS', registro: Object.assign({}, l, {SUBCLASSE:para}, guardaSub(l, o))});
   });
-  (DB.CONTAS_RECEBER||[]).filter(c => mesmaCategoria(c.CATEGORIA, de)).forEach(c => {
-    p.rec++; p.total = rd(p.total + n(c.VALOR));
-    p.regs.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, c, {CATEGORIA:para}, guardaSub(c))});
+  (DB.CONTAS_RECEBER||[]).forEach(c => {
+    const o = daFonte(c.CATEGORIA); if (!o) return;
+    p.rec++; p.total = rd(p.total + n(c.VALOR)); marca(o, n(c.VALOR));
+    p.regs.push({aba:'CONTAS_RECEBER', registro: Object.assign({}, c, {CATEGORIA:para}, guardaSub(c, o))});
   });
-  (DB.CONTAS_PAGAR||[]).filter(c => mesmaCategoria(c.CATEGORIA, de)).forEach(c => {
-    p.pag++; p.total = rd(p.total + n(c.VALOR));
-    p.regs.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {CATEGORIA:para}, guardaSub(c))});
+  (DB.CONTAS_PAGAR||[]).forEach(c => {
+    const o = daFonte(c.CATEGORIA); if (!o) return;
+    p.pag++; p.total = rd(p.total + n(c.VALOR)); marca(o, n(c.VALOR));
+    p.regs.push({aba:'CONTAS_PAGAR', registro: Object.assign({}, c, {CATEGORIA:para}, guardaSub(c, o))});
   });
   // as regras de comissão apontam para o nome da categoria: vão junto
-  (DB.REGRAS_COMISSAO||[]).filter(r => mesmaCategoria(r.SUBCLASSE, de)).forEach(r => {
-    p.regras++;
+  (DB.REGRAS_COMISSAO||[]).forEach(r => {
+    const o = daFonte(r.SUBCLASSE); if (!o) return;
+    p.regras++; marca(o, 0);
     p.regs.push({aba:'REGRAS_COMISSAO', registro: Object.assign({}, r, {SUBCLASSE:para})});
   });
   // subcategorias cadastradas sob a categoria antiga passam para a nova
-  (DB.SUBCATEGORIAS||[]).filter(x => mesmaCategoria(x.CATEGORIA, de)).forEach(x => {
-    p.subs++;
+  (DB.SUBCATEGORIAS||[]).forEach(x => {
+    const o = daFonte(x.CATEGORIA); if (!o) return;
+    p.subs++; marca(o, 0);
     p.regs.push({aba:'SUBCATEGORIAS', registro: Object.assign({}, x, {CATEGORIA:para})});
   });
   p.itens = [
@@ -9086,65 +9110,121 @@ function planoMoverCategoria(de, para, virarSub){
     {oque:'Regras de comissão', n:p.regras},
     {oque:'Subcategorias cadastradas', n:p.subs}
   ].filter(x => x.n);
+  // uma categoria escolhida sem nenhum registro ainda aparece: ela será apagada
+  p.porCat = fontes.map(f => conta[f] || {cat:f, n:0, valor:0});
   return p;
+}
+/* as fontes escolhidas, sempre como lista */
+const fontesMover = () => (Array.isArray(FILTROS.mvDe) ? FILTROS.mvDe : (FILTROS.mvDe ? [FILTROS.mvDe] : []));
+/* a lista desenhada na tela; o checkbox manda o índice, não o nome, para
+   nenhum nome com aspas ou acento quebrar o atributo onchange */
+let MV_CATS = [];
+const nomeFonte = x => typeof x === 'number' ? (MV_CATS[x] || '') : String(x||'');
+function marcarFonteMover(qual, marcado){
+  const nome = nomeFonte(qual);
+  if (!nome) return;
+  const l = fontesMover().filter(x => x !== nome);
+  FILTROS.mvDe = marcado ? l.concat([nome]) : l;
+  if (FILTROS.mvPara && fontesMover().some(f => mesmaCategoria(f, FILTROS.mvPara))) FILTROS.mvPara = '';
+  verificarMoverCategoria();
+}
+function limparFontesMover(){ FILTROS.mvDe = []; verificarMoverCategoria(); }
+/* débito ou crédito de cada fonte: juntar um com o outro trocaria o sinal
+   dos lançamentos sem ninguém perceber, então o destino fica preso ao tipo */
+function tiposFonte(fontes){
+  const t = {};
+  (fontes||[]).forEach(f => {
+    const c = (DB.SUBCLASSES||[]).find(x => x.NOME === f);
+    if (c) t[ehDebitoCat(c) ? 'D' : 'C'] = 1;
+  });
+  return Object.keys(t);
 }
 function verificarMoverCategoria(de, para){
   const cats = (DB.SUBCLASSES||[]).map(c => c.NOME)
     .sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
-  const d = de == null ? (FILTROS.mvDe || '') : de;
-  const a2 = para == null ? (FILTROS.mvPara || '') : para;
-  FILTROS.mvDe = d; FILTROS.mvPara = a2;
-  const tipoDe = (DB.SUBCLASSES||[]).find(c => c.NOME === d);
-  // destino só entre categorias do mesmo tipo: juntar crédito com débito
-  // trocaria o sinal dos lançamentos sem ninguém perceber
-  const destinos = cats.filter(c => c !== d
-    && (!tipoDe || ehDebitoCat((DB.SUBCLASSES||[]).find(x => x.NOME === c) || {}) === ehDebitoCat(tipoDe)));
+  MV_CATS = cats;
+  if (de != null) FILTROS.mvDe = Array.isArray(de) ? de : (de ? [de] : []);
+  if (para != null) FILTROS.mvPara = para;
+  const fontes = fontesMover().filter(f => cats.indexOf(f) > -1);
+  FILTROS.mvDe = fontes;
+  const a2 = FILTROS.mvPara || '';
+  const tipos = tiposFonte(fontes);
+  const misturado = tipos.length > 1;
+  const destinos = misturado ? [] : cats.filter(c => fontes.indexOf(c) < 0
+    && (!tipos.length || (ehDebitoCat((DB.SUBCLASSES||[]).find(x => x.NOME === c) || {}) ? 'D' : 'C') === tipos[0]));
+  if (a2 && destinos.indexOf(a2) < 0) FILTROS.mvPara = '';
+  const alvo = FILTROS.mvPara || '';
   const sub = FILTROS.mvSub == null ? true : !!FILTROS.mvSub;
-  const p = planoMoverCategoria(d, a2, sub);
+  const p = planoMoverCategoria(fontes, alvo, sub);
+  const rol = guardarRolagem(['mvRol']);
 
-  const campos = '<div class="grade" style="margin-bottom:12px">'
-    + sel('mvDe','Categoria a esvaziar', [['','— selecione —']].concat(cats.map(c => [c,c])), d, '',
-        'onchange="FILTROS.mvDe=this.value;FILTROS.mvPara=\'\';verificarMoverCategoria()"')
-    + sel('mvPara','Passar tudo para', [['','— selecione —']].concat(destinos.map(c => [c,c])), a2, '',
-        'onchange="FILTROS.mvPara=this.value;verificarMoverCategoria()"')
+  const lista = '<div class="campo"><label>Categorias a esvaziar</label>'
+    + '<div class="listaCats" id="mvRol">'
+    + (cats.length ? cats.map((c,i) =>
+        '<div class="check"><input type="checkbox" id="mvDe'+i+'"'
+        + (fontes.indexOf(c) > -1 ? ' checked' : '')
+        + ' onchange="marcarFonteMover('+i+', this.checked)">'
+        + '<label for="mvDe'+i+'">'+esc(c)+'</label></div>').join('')
+      : '<p class="mini">Nenhuma categoria cadastrada.</p>')
     + '</div>'
+    + '<p class="mini" style="margin:6px 0 0">'
+    + (fontes.length ? fontes.length + ' selecionada(s) · <a href="#" onclick="limparFontesMover();return false">limpar</a>'
+                     : 'Pode marcar várias de uma vez.')
+    + '</p></div>';
+
+  const campos = '<div class="gradeMover" style="margin-bottom:12px">'
+    + lista
+    + '<div>'
+    + sel('mvPara','Passar tudo para', [['','— selecione —']].concat(destinos.map(c => [c,c])), alvo, '',
+        'onchange="FILTROS.mvPara=this.value;verificarMoverCategoria()"')
+    + (misturado
+       ? '<p class="mini" style="margin:6px 0 0;color:var(--neg)">Há categorias de crédito e de débito marcadas juntas. '
+         + 'Deixe só de um tipo para escolher o destino.</p>'
+       : '')
     + '<div class="check"><input type="checkbox" id="mvSub"'+(sub?' checked':'')
       + ' onchange="FILTROS.mvSub=this.checked;verificarMoverCategoria()">'
-      + '<label for="mvSub">Guardar <b>'+esc(d||'a categoria antiga')+'</b> como subcategoria dos lançamentos movidos'
-      + '</label></div>'
-    + '<p class="mini" style="margin:6px 0 0">Assim o detalhe não se perde: o lançamento passa a ser '
-    + esc(a2 || 'a nova categoria') + ' com a subcategoria ' + esc(d || 'antiga')
-    + '. Lançamento que já tem subcategoria não é mexido.</p>';
+      + '<label for="mvSub">Guardar a categoria antiga como subcategoria dos lançamentos movidos</label></div>'
+    + '<p class="mini" style="margin:6px 0 0">Assim o detalhe não se perde: cada lançamento passa a ser '
+    + esc(alvo || 'a nova categoria') + ' com a subcategoria do nome que ele tinha. '
+    + 'Lançamento que já tem subcategoria não é mexido.</p>'
+    + '</div></div>';
 
-  const corpo = campos + (!d || !a2
-    ? vazio('Escolha as duas categorias', 'A da esquerda fica vazia; tudo passa para a da direita.')
-    : !p.regs.length
-      ? vazio('Nada para mover', 'Não há lançamento nenhum em ' + d + '.')
-      : '<div class="kpis" style="margin:14px 0 10px">'
-        + kpi('Registros a mover', p.regs.length, 'de ' + esc(d) + ' para ' + esc(a2), 'd')
+  const corpo = campos + (!fontes.length || !alvo
+    ? vazio('Escolha as categorias', 'As marcadas ficam vazias; tudo passa para a da direita.')
+    : '<div class="kpis" style="margin:14px 0 10px">'
+        + kpi('Registros a mover', p.regs.length, fontes.length + ' categoria(s) → ' + esc(alvo), 'd')
         + kpi('Valor envolvido', moeda(p.total), 'contas a pagar e a receber', 'p')
         + '</div>'
-        + '<div class="tw"><table class="densa"><thead><tr><th>Onde</th><th class="num">Registros</th>'
-        + '</tr></thead><tbody>'
-        + p.itens.map(i => '<tr><td>'+esc(i.oque)+'</td><td class="num">'+i.n+'</td></tr>').join('')
+        + '<div class="tw"><table class="densa"><thead><tr><th>Categoria</th><th class="num">Registros</th>'
+        + '<th class="num">Valor</th></tr></thead><tbody>'
+        + p.porCat.map(c => '<tr><td>'+esc(c.cat)+'</td><td class="num">'+c.n+'</td>'
+            + '<td class="num">'+(c.valor ? moeda(c.valor) : '—')+'</td></tr>').join('')
         + '</tbody></table></div>'
+        + (p.itens.length
+           ? '<div class="tw" style="margin-top:10px"><table class="densa"><thead><tr><th>Onde</th>'
+             + '<th class="num">Registros</th></tr></thead><tbody>'
+             + p.itens.map(i => '<tr><td>'+esc(i.oque)+'</td><td class="num">'+i.n+'</td></tr>').join('')
+             + '</tbody></table></div>'
+           : '')
         + '<p class="mini" style="margin-top:10px">Os valores não mudam — só o nome da categoria. '
-        + 'Depois de mover, <b>' + esc(d) + '</b> fica sem nenhum lançamento e pode ser apagada.</p>');
+        + 'Depois de mover, as categorias marcadas ficam sem nenhum lançamento e são apagadas.</p>');
 
   modal('Juntar categorias', corpo,
     '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
-    + (p.regs.length
+    + (fontes.length && alvo
        ? '<button class="btn" onclick="aplicarMoverCategoria()">Mover '+p.regs.length+' registro(s)</button>' : ''),
     'larga');
+  devolverRolagem(rol);
 }
 async function aplicarMoverCategoria(){
-  const de = FILTROS.mvDe, para = FILTROS.mvPara;
+  const fontes = fontesMover(), para = FILTROS.mvPara;
   const sub = FILTROS.mvSub == null ? true : !!FILTROS.mvSub;
-  const p = planoMoverCategoria(de, para, sub);
-  if (!p.regs.length) return toast('Nada para mover.','erro');
-  const apagarCat = confirm('Mover ' + p.regs.length + ' registro(s) de "' + de + '" para "' + para + '"?'
-    + (sub ? '\n\n"' + de + '" fica como subcategoria nos lançamentos que não tinham uma.' : '')
-    + '\n\nOK para mover e apagar a categoria "' + de + '" em seguida.'
+  const p = planoMoverCategoria(fontes, para, sub);
+  if (!fontes.length || !para) return toast('Escolha as categorias.','erro');
+  const nomes = p.de.join('", "');
+  const apagarCat = confirm('Mover ' + p.regs.length + ' registro(s) de "' + nomes + '" para "' + para + '"?'
+    + (sub ? '\n\nO nome antigo fica como subcategoria nos lançamentos que não tinham uma.' : '')
+    + '\n\nOK para mover e apagar em seguida a(s) categoria(s) que ficar(em) vazia(s).'
     + '\nCancelar para não fazer nada.');
   if (!apagarCat) return;
   fecharModal();
@@ -9159,19 +9239,24 @@ async function aplicarMoverCategoria(){
   });
   invalidarIdx();
 
-  // a categoria só é apagada quando nada mais aponta para ela
-  const sobra = planoMoverCategoria(de, para, sub).regs.length;
-  const cat = (DB.SUBCLASSES||[]).find(c => c.NOME === de);
-  const apagar = (!sobra && cat) ? [{aba:'SUBCLASSES', id:cat.ID}] : [];
+  // cada categoria só é apagada quando nada mais aponta para ela
+  const apagar = [], apagados = [], ficaram = [];
+  p.de.forEach(f => {
+    const cat = (DB.SUBCLASSES||[]).find(c => c.NOME === f);
+    if (cat && !planoMoverCategoria(f, para, sub).regs.length){
+      apagar.push({aba:'SUBCLASSES', id:cat.ID}); apagados.push(f);
+    } else if (cat) ficaram.push(f);
+  });
   if (apagar.length){
-    DB.SUBCLASSES = (DB.SUBCLASSES||[]).filter(c => c.ID !== cat.ID);
+    const ids = {}; apagar.forEach(a => ids[a.id] = 1);
+    DB.SUBCLASSES = (DB.SUBCLASSES||[]).filter(c => !ids[c.ID]);
     invalidarIdx();
   }
   toast(p.regs.length + ' registro(s) movido(s) para "' + para + '"'
-    + (apagar.length ? ' · categoria "' + de + '" apagada.'
-                     : '. A categoria "' + de + '" não foi apagada'
-                       + (sobra ? ' — ainda há registros nela' : '') + '.'),'ok');
-  FILTROS.mvDe = ''; FILTROS.mvPara = '';
+    + (apagados.length ? ' · apagada(s): ' + apagados.join(', ') : '')
+    + (ficaram.length ? ' · ainda com registros: ' + ficaram.join(', ') : '') + '.',
+    ficaram.length ? 'erro' : 'ok');
+  FILTROS.mvDe = []; FILTROS.mvPara = '';
   render();
 
   try{
