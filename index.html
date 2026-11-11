@@ -188,9 +188,17 @@ table.densa .btn.sm{padding:2px 8px;font-size:11px}
 .mini{font-size:11.5px;color:var(--ink3)}
 
 /* ── FILTROS ── */
+/* Os filtros cabem numa linha só: cada campo encolhe em vez de pular para a
+   linha de baixo. Só quebra mesmo em tela estreita, onde não cabe de jeito
+   nenhum. O Limpar vai junto, no fim da mesma linha. */
 .filtros{display:flex;gap:9px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px}
-.filtros .campo{margin:0;min-width:130px}
-.filtros .campo.busca{flex:1;min-width:200px}
+.filtros .campo{margin:0;min-width:0;flex:1 1 112px}
+.filtros .campo.busca{flex:2 1 170px}
+.filtros .campo input,.filtros .campo select{width:100%;min-width:0}
+.filtros .campo label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filtros .campo.limpar{flex:0 0 auto}
+.filtros .campo.limpar .btn{white-space:nowrap}
+@media (max-width:860px){ .filtros .campo{flex:1 1 140px} }
 
 /* ── KPIs ── */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px}
@@ -335,7 +343,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v12.9';
+const VERSAO_APP = 'v13.2';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -1060,7 +1068,7 @@ function campoValor(id, rot){
     + '<input id="'+id+'" value="'+esc(FILTROS[id]||'')+'" placeholder="0,00" onchange="setF(\''+id+'\',this.value)"></div>';
 }
 function botaoLimpar(ids){
-  return '<div class="campo" style="min-width:0"><label>&nbsp;</label>'
+  return '<div class="campo limpar"><label>&nbsp;</label>'
     + '<button class="btn sec" onclick="limparFiltros([\''+ids.join("','")+'\'])">Limpar</button></div>';
 }
 function limparFiltros(ids){ ids.forEach(k => delete FILTROS[k]); render(); }
@@ -1094,15 +1102,32 @@ function casaValor(valor, termo){
   const v = Math.abs(n(valor));
   return digitos(nMoeda(v)).includes(dt) || digitos(String(v)).includes(dt);
 }
-function selMes(id, valor){
-  const meses = new Set();
-  (DB.PARCELAS||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); if (p.DATA_CREDITO) meses.add(mesDe(p.DATA_CREDITO)); });
-  (DB.CONTAS_PAGAR||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); if (p.DATA_PGTO) meses.add(mesDe(p.DATA_PGTO)); });
-  // recebimentos avulsos também aparecem nas telas filtradas por mês
-  (DB.CONTAS_RECEBER||[]).forEach(c => { if (c.VENCIMENTO) meses.add(mesDe(c.VENCIMENTO)); if (c.DATA_RECEB) meses.add(mesDe(c.DATA_RECEB)); });
-  meses.add(mesDe(hoje()));
+function selMes(id, valor, lista){
+  let meses;
+  if (lista){
+    // a tela diz quais meses tem: em comissões, por exemplo, só os de
+    // recebimento, e não os vencimentos futuros que vão até 2038
+    meses = new Set(lista.filter(Boolean).map(mesDe));
+  } else {
+    meses = new Set();
+    (DB.PARCELAS||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); if (p.DATA_CREDITO) meses.add(mesDe(p.DATA_CREDITO)); });
+    (DB.CONTAS_PAGAR||[]).forEach(p => { if (p.VENCIMENTO) meses.add(mesDe(p.VENCIMENTO)); if (p.DATA_PGTO) meses.add(mesDe(p.DATA_PGTO)); });
+    // recebimentos avulsos também aparecem nas telas filtradas por mês
+    (DB.CONTAS_RECEBER||[]).forEach(c => { if (c.VENCIMENTO) meses.add(mesDe(c.VENCIMENTO)); if (c.DATA_RECEB) meses.add(mesDe(c.DATA_RECEB)); });
+    meses.add(mesDe(hoje()));
+  }
+  // o mês escolhido nunca some da lista, mesmo que o dado dele tenha saído
+  if (valor) meses.add(valor);
   return '<div class="campo"><label>Mês</label><select id="'+id+'" onchange="setF(\''+id+'\',this.value)"><option value="">Todos</option>'
     + [...meses].filter(Boolean).sort().reverse().map(m => '<option value="'+m+'"'+(valor===m?' selected':'')+'>'+mesBR(m)+'</option>').join('') + '</select></div>';
+}
+/* os meses em que houve recebimento — é o que a tela de comissões filtra */
+function mesesComComissao(){
+  const d = [];
+  (DB.PARCELAS||[]).forEach(p => { if (p.STATUS === 'Recebida' && p.DATA_CREDITO) d.push(p.DATA_CREDITO); });
+  (DB.CONTAS_RECEBER||[]).forEach(c => { if (c.STATUS === 'Recebido' && c.DATA_RECEB) d.push(c.DATA_RECEB); });
+  (DB.COMISSOES||[]).forEach(c => { if (c.DATA) d.push(c.DATA); });
+  return d;
 }
 
 /* ── ÍNDICES ──
@@ -1672,7 +1697,7 @@ const GRUPO_PARTICULAR = 'Particular';
    aplicação financeira, obra — sai do DRE do escritório e forma um DRE só dele.
    A lista é editável em Configurações → Geral. A comparação ignora acento,
    maiúscula e ponto, então "Receita Dra Karla" acha "Receita Dra. Karla". */
-const CATS_PARTICULAR_PADRAO = 'Receita Dra. Karla, Resgate Aplicação, Aplicação, Despesa Dra. Karla, Obra';
+const CATS_PARTICULAR_PADRAO = 'Receita Dra. Karla, Reembolso Sulamérica, Despesa Dra. Karla';
 const chaveCat = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
                         .replace(/\./g,'').replace(/\s+/g,' ').trim().toLowerCase();
 const catsParticular = () => String(cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO))
@@ -1689,6 +1714,23 @@ const CATS_ESCRITORIO_PADRAO = 'Sucumbência';
 const catsEscritorio = () => String(cfg('CATEGORIAS_ESCRITORIO', CATS_ESCRITORIO_PADRAO))
   .split(/[,;|]/).map(chaveCat).filter(Boolean);
 const ehCatEscritorio = nome => catsEscritorio().indexOf(chaveCat(nome)) > -1;
+
+/* ── Aplicações financeiras: transferência entre contas próprias ───────────
+   Mandar dinheiro para a conta de aplicação não é despesa, e resgatar não é
+   receita: o dinheiro continua sendo do escritório, só mudou de conta. Em
+   "Comparar meses" essas duas categorias saem das linhas de receita e despesa
+   e formam um quadro próprio, onde enviado menos resgatado mostra quanto ficou
+   aplicado no mês. Os nomes são editáveis em Configurações → Geral. */
+const CAT_APLICACAO_PADRAO = 'Transferência Conta 2';   // saída para a aplicação
+const CAT_RESGATE_PADRAO   = 'Crédito Conta 2';         // volta da aplicação
+const catAplicacao = () => String(cfg('CATEGORIA_APLICACAO', CAT_APLICACAO_PADRAO)).trim();
+const catResgate   = () => String(cfg('CATEGORIA_RESGATE', CAT_RESGATE_PADRAO)).trim();
+const ehCatAplicacao = nome => !!catAplicacao() && mesmaCategoria(nome, catAplicacao());
+const ehCatResgate   = nome => !!catResgate()   && mesmaCategoria(nome, catResgate());
+const ehCatConta2 = nome => ehCatAplicacao(nome) || ehCatResgate(nome);
+/* soma as chaves de um mapa de categorias que passam no teste */
+const somaCats = (mapa, teste) => rd(Object.keys(mapa||{})
+  .filter(teste).reduce((s,k) => s + n(mapa[k]), 0));
 
 const grupoDaCat = nome => {
   const c = (DB.SUBCLASSES||[]).find(x => x.NOME === nome);
@@ -1976,6 +2018,8 @@ function cfgGeral(){
     + inp('cgParticular','Categorias do DRE particular', cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO), 'full')
     + inp('cgParcValor','Categorias com valor por parcela', cfg('CATEGORIAS_PARC_VALOR', CATS_PARC_VALOR_PADRAO), 'full')
     + inp('cgSoEsc','Categorias 100% do escritório (sem rateio com o cliente)', cfg('CATEGORIAS_ESCRITORIO', CATS_ESCRITORIO_PADRAO), 'full')
+    + inp('cgAplic','Categoria de envio para aplicação (conta 2)', cfg('CATEGORIA_APLICACAO', CAT_APLICACAO_PADRAO))
+    + inp('cgResg','Categoria de resgate da aplicação (conta 2)', cfg('CATEGORIA_RESGATE', CAT_RESGATE_PADRAO))
     + inp('cgPadTarifa','Termos que indicam tarifa no extrato', cfg('PADROES_TARIFA', PADROES_TARIFA_PADRAO), 'full')
     + inp('cgCatTarifa','Categoria das tarifas bancárias', cfg('CATEGORIA_TARIFA', CAT_TARIFA_PADRAO))
     + inp('cgPctNI','% dos depósitos não identificados no resultado real', cfg('PCT_NAO_IDENT','30'))
@@ -2146,6 +2190,8 @@ async function gravarGeral(){
                     {aba:'CONFIG', registro:{...acha('CATEGORIAS_PARTICULAR'), VALOR:val('cgParticular')}},
                     {aba:'CONFIG', registro:{...acha('CATEGORIAS_PARC_VALOR'), VALOR:val('cgParcValor')}},
                     {aba:'CONFIG', registro:{...acha('CATEGORIAS_ESCRITORIO'), VALOR:val('cgSoEsc')}},
+                    {aba:'CONFIG', registro:{...acha('CATEGORIA_APLICACAO'), VALOR:val('cgAplic')}},
+                    {aba:'CONFIG', registro:{...acha('CATEGORIA_RESGATE'), VALOR:val('cgResg')}},
                     {aba:'CONFIG', registro:{...acha('PADROES_TARIFA'), VALOR:val('cgPadTarifa')}},
                     {aba:'CONFIG', registro:{...acha('CATEGORIA_TARIFA'), VALOR:val('cgCatTarifa')}},
                     {aba:'CONFIG', registro:{...d, VALOR:val('cgPctNI')}},
@@ -6051,6 +6097,7 @@ function telaReceber(){
 
   L = L.filter(r => casa(r, ['pasta','cliente','proc','desc','cat','sub'], t))
        .filter(r => entreDatas(r.venc, FILTROS.arDe, FILTROS.arAte))
+       .filter(r => entreValores(r.valor, FILTROS.arMin, FILTROS.arMax))
        .filter(r => !mes || mesDe(r.venc) === mes)
        .filter(r => !sit || (sit === 'vencidas' ? vencido(r.venc)
                            : sit === 'conciliando' ? emConciliacao(r.venc)
@@ -6093,9 +6140,10 @@ function telaReceber(){
     + abasR
     + '<div class="filtros">' + campoBusca('Pasta, cliente, processo ou descrição…')
     + campoData('arDe','Vencimento de') + campoData('arAte','até')
+    + campoValor('arMin','Valor de') + campoValor('arMax','Valor até')
     + selMes('fMesR', mes)
     + sel('fSit','Situação',[['','Todas'],['vencidas','Vencidas'],['conciliando','Em conciliação'],['aVencer','A vencer']], sit,'','onchange="setF(\'fSit\',this.value)"')
-    + botaoLimpar(['busca','arDe','arAte','fMesR','fSit']) + '</div>'
+    + botaoLimpar(['busca','arDe','arAte','arMin','arMax','fMesR','fSit']) + '</div>'
     + (selecionados.length
         ? '<div class="barraSel"><b>'+selecionados.length+'</b> selecionado(s) · '
           + moeda(selecionados.reduce((s,r) => s + r.valor, 0))
@@ -7223,7 +7271,9 @@ function telaComissoes(){
     + coms.map((c,i) => kpi(c.NOME, moeda(dc.totais.porCom[i]),
           moeda(dc.totais.porComAberto[i]) + ' em aberto', 'b')).join('')
     + '</div>'
-    + '<div class="filtros">' + campoBusca('Cliente, pasta, subclasse…') + selMes('fMesC', mes) + '</div>'
+    + '<div class="filtros">' + campoBusca('Cliente, pasta, subclasse…')
+    + selMes('fMesC', mes, mesesComComissao())
+    + botaoLimpar(['busca','fMesC']) + '</div>'
     + (coms.length
       ? '<div class="card"><div class="tw fixa"><table><thead>'+cabecalho+'</thead><tbody>'+linhas+'</tbody>'+rodape+'</table></div></div>'
       : '<div class="card">'+vazio('Nenhum comissionado cadastrado','Cadastre os comissionados e as regras por categoria na engrenagem, em Regras de comissão.')+'</div>');
@@ -7552,6 +7602,13 @@ function telaPainel(){
   const grupos = gruposDRE();
   const sub = SUB || 'indicadores';
 
+  const topoPart = cabec('Painel e DRE',
+      'Aba Particular: o que não é do escritório — fica fora do DRE e do comparativo.',
+      '<button class="btn sec" onclick="exportarCSV(\'dre\')">Exportar CSV</button>')
+    + '<div class="filtros">' + selMes('fMesD', mes) + '</div>'
+    + subtabs([['indicadores','Painel'],['resultado','DRE'],['comparativo','Comparar meses'],
+               ['agendado','Realizado x agendado'],['particular','Particular']]);
+
   const topo = cabec('Painel e DRE',
       'Resultado por regime de caixa. Repasses aos clientes são recursos de terceiros e ficam fora do resultado.',
       '<button class="btn sec" onclick="exportarCSV(\'dre\')">Exportar CSV</button>')
@@ -7560,14 +7617,36 @@ function telaPainel(){
         ? sel('fGrupo','DRE', grupos.map(g => [g, rotuloDRE(g)]), grupo, '', 'onchange="setF(\'fGrupo\',this.value)"')
         : '')
     + '</div>'
-    + subtabs([['indicadores','Painel'],['resultado','DRE'],['comparativo','Comparar meses'],['agendado','Realizado x agendado']]);
+    + subtabs([['indicadores','Painel'],['resultado','DRE'],['comparativo','Comparar meses'],
+               ['agendado','Realizado x agendado'],['particular','Particular']]);
 
   if (sub === 'resultado') return topo + dreResultado(mes, grupo);
   if (sub === 'comparativo') return topo + dreComparativo(grupo);
   if (sub === 'agendado') return topo + dreAgendado(mes, grupo);
+  if (sub === 'particular') return topoPart + drePariticular(mes);
   return topo + painelIndicadores(mes);
 }
 
+/* ── Aba Particular ──
+   O que não é do escritório: receita e despesa pessoais. Usa o mesmo DRE das
+   outras abas, só apontado para o grupo Particular, e mostra quais categorias
+   o compõem — assim fica claro por que uma categoria está aqui e não no
+   comparativo, e onde mudar isso. */
+function drePariticular(mes){
+  const cats = String(cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO))
+    .split(/[,;|]/).map(x => x.trim()).filter(Boolean);
+  const rec = cats.filter(c => !ehDebitoCat((DB.SUBCLASSES||[]).find(x => mesmaCategoria(x.NOME, c)) || {NOME:c}));
+  const desp = cats.filter(c => rec.indexOf(c) < 0);
+  return '<div class="card" style="border-left:3px solid var(--brass)"><div class="corpo">'
+    + '<p class="mini" style="margin:0">Entram aqui: '
+    + (rec.length ? '<b>receitas</b> ' + esc(rec.join(', ')) : '')
+    + (rec.length && desp.length ? ' · ' : '')
+    + (desp.length ? '<b>despesas</b> ' + esc(desp.join(', ')) : '')
+    + (cats.length ? '' : 'nenhuma categoria marcada como particular')
+    + '. Essas categorias ficam fora do DRE do escritório e da aba Comparar meses. '
+    + 'A lista é editável em Configurações → Geral.</p></div></div>'
+    + dreResultado(mes, GRUPO_PARTICULAR);
+}
 function dreResultado(mes, grupo){
   const d = dadosDRE(mes, grupo);
   const aberto = pendentesReceber();
@@ -7640,10 +7719,21 @@ function dreComparativo(grupo){
     meses.push(dt.toISOString().slice(0,7));
   }
   const dados = meses.map(m => dadosDRE(m, grupo));
+  /* As duas categorias de conta 2 saem daqui e viram o quadro de aplicações.
+     O filtro vai depois de linhasCategoria porque ela junta as categorias
+     cadastradas com as que aparecem no movimento — tirar só da lista de
+     entrada deixaria a categoria voltar pela porta dos dados. */
   const catsRec = linhasCategoria(categoriasDoGrupo('C', grupo),
-    somarMapas.apply(null, dados.map(d => d.receitas)));
+    somarMapas.apply(null, dados.map(d => d.receitas))).filter(c => !ehCatConta2(c));
   const catsDesp = linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'),
-    somarMapas.apply(null, dados.map(d => d.despesas)));
+    somarMapas.apply(null, dados.map(d => d.despesas))).filter(c => !ehCatConta2(c));
+  // e também dos totais, senão as linhas não somariam o que o total mostra
+  const resgatado = dados.map(d => somaCats(d.receitas, ehCatResgate));
+  const aplicado  = dados.map(d => somaCats(d.despesas, ehCatAplicacao));
+  const temConta2 = resgatado.concat(aplicado).some(v => v);
+  const bruta  = dados.map((d,i) => rd(d.bruta - resgatado[i]));
+  const desp   = dados.map((d,i) => rd(d.totDesp - aplicado[i]));
+  const result = dados.map((d,i) => rd(bruta[i] - desp[i]));
 
   const varia = vals => {
     const a = vals[vals.length-2], b = vals[vals.length-1];
@@ -7666,14 +7756,32 @@ function dreComparativo(grupo){
     + '<table class="dre densa"><thead><tr><th></th>'
     + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
     + '<th class="num">Variação</th></tr></thead><tbody>'
-    + linha('Receita bruta', dados.map(d => d.bruta), 'nivel1')
+    + linha('Receita bruta', bruta, 'nivel1')
     + catsRec.map(c => linha(c, dados.map(d => d.receitas[c] || 0), 'recuo', 'receita|'+c)).join('')
     + linha('Tarifas bancárias', dados.map(d => d.tarifas), 'recuo', 'tarifas')
-    + linha('Despesas operacionais', dados.map(d => -d.totDesp), 'nivel1')
+    + linha('Despesas operacionais', desp.map(v => -v), 'nivel1')
     + catsDesp.map(c => linha(c, dados.map(d => -(d.despesas[c] || 0)), 'recuo', 'despesa|'+c)).join('')
-    + linha('Resultado', dados.map(d => d.resultado), 'total')
+    + linha('Resultado', result, 'total')
     + '</tbody></table></div></div>'
-    + '<p class="mini">A coluna de variação compara o último mês com o anterior. Clique em qualquer valor para ver as contas daquele mês.</p>';
+    + (!temConta2 ? '' :
+      '<div class="card"><h3>Aplicações financeiras</h3><div class="tw">'
+      + '<table class="dre densa"><thead><tr><th></th>'
+      + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
+      + '<th class="num">Variação</th></tr></thead><tbody>'
+      + linha('Valor enviado para aplicação', aplicado, '', 'despesa|'+catAplicacao())
+      + linha('Resgate de aplicação', resgatado, '', 'receita|'+catResgate())
+      + linha('Resultado das aplicações no mês',
+              aplicado.map((v,i) => rd(v - resgatado[i])), 'total')
+      + '</tbody></table></div>'
+      + '<p class="mini" style="margin-top:8px">Enviado menos resgatado: positivo é quanto ficou aplicado '
+      + 'no mês, negativo é quanto voltou da aplicação para a conta do dia a dia. '
+      + '<b>' + esc(catAplicacao()) + '</b> é o valor enviado e <b>' + esc(catResgate()) + '</b> o resgate.</p>'
+      + '</div>')
+    + '<p class="mini">A coluna de variação compara o último mês com o anterior. '
+    + 'Clique em qualquer valor para ver as contas daquele mês.'
+    + (temConta2 ? ' Transferências entre contas próprias ficam no quadro de aplicações e '
+        + 'não entram na receita, na despesa nem no resultado acima — o dinheiro só mudou de conta.' : '')
+    + '</p>';
 }
 function verMesDRE(mes, chave){
   FILTROS.fMesD = mes;
@@ -8026,12 +8134,8 @@ function telaContaCorrente(){
       '<button class="btn sec" onclick="limparFiltrosCC()">Limpar filtros</button>'
     + '<button class="btn sec" onclick="exportarCSV(\'conta-corrente\')">Exportar CSV</button>')
     + avisoExtratoParcial()
-    + '<div class="kpis">'
-    + kpi('Entradas', moeda(cred), L.filter(r => !ehDebito(r.m)).length + ' crédito(s)', 'p')
-    + kpi('Saídas', moeda(deb), L.filter(r => ehDebito(r.m)).length + ' débito(s)', 'n')
-    + kpi('Resultado do período', moeda(rd(cred + deb)), 'entradas menos saídas', rd(cred+deb) >= 0 ? 'p' : 'n')
-    + kpi('Movimentos', L.length, 'no filtro atual', 'd')
-    + '</div>'
+    /* Os cartões de Entradas, Saídas, Resultado e Movimentos saíram: o rodapé
+       da tabela traz os mesmos números, e repetidos no alto só comiam tela. */
     + '<div class="filtros">'
     + campoBusca('Nome, favorecido, histórico…')
     + sel('ccConta','Conta bancária', opcoesContas(true), FILTROS.ccConta||'', '', 'onchange="setF(\'ccConta\',this.value)"')
