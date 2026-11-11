@@ -252,6 +252,9 @@ table.dre td:first-child{white-space:nowrap}
 table.dre tr.nivel1 td{font-weight:600;background:var(--surface2)}
 table.dre tr.total td{font-weight:700;border-top:2px solid var(--ink);border-bottom:2px solid var(--ink);font-size:14px}
 table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
+/* subcategoria: um degrau abaixo da categoria */
+table.dre tr.recuo2 td:first-child{padding-left:46px;color:var(--ink3);font-size:12.5px}
+table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
 .barra{height:7px;background:var(--line2);border-radius:4px;overflow:hidden;margin-top:5px}
 .barra i{display:block;height:100%;background:var(--brand)}
 
@@ -343,7 +346,7 @@ table.dre tr.recuo td:first-child{padding-left:26px;color:var(--ink2)}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v13.2';
+const VERSAO_APP = 'v13.5';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -7287,15 +7290,26 @@ function dadosDRE(mes, grupo){
   const catParcela = p => p.TIPO === 'Sucumbência' ? 'Sucumbência' : (lancDe(p.LANC_ID).SUBCLASSE || '—');
 
   const receitas = {}, despesas = {}, repasses = {}, fora = {};
+  // o mesmo total aberto por subcategoria: subDesp['Despesa Dra. Karla']['Cartão']
+  const subRec = {}, subDesp = {};
   let tarifas = 0;
   const soma = (obj, k, v) => { if (!v) return; obj[k] = rd((obj[k] || 0) + v); };
+  const somaSub = (obj, cat, sub, v) => {
+    if (!v) return;
+    const s2 = String(sub == null ? '' : sub).trim() || '— sem subcategoria —';
+    obj[cat] = obj[cat] || {};
+    obj[cat][s2] = rd((obj[cat][s2] || 0) + v);
+  };
 
   (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida' && noMes(p.DATA_CREDITO))
     .filter(p => doGrupo(catParcela(p)))
     .forEach(p => {
       const sp = p.TIPO === 'Sucumbência' ? 0 : sucDaParcela(p, n(p.VALOR_CREDITADO) || n(p.VALOR));
-      soma(receitas, catParcela(p), rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA) - sp));
-      if (sp) soma(receitas, 'Sucumbência', sp);      // a fatia de sucumbência vira linha própria
+      const vp = rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA) - sp);
+      soma(receitas, catParcela(p), vp);
+      somaSub(subRec, catParcela(p), lancDe(p.LANC_ID).SUBCATEGORIA, vp);
+      if (sp){ soma(receitas, 'Sucumbência', sp);     // a fatia de sucumbência vira linha própria
+               somaSub(subRec, 'Sucumbência', lancDe(p.LANC_ID).SUBCATEGORIA, sp); }
       const rpP = repasseDe(p);                   // apagado do sistema não entra
       const forP = repasseNaoDevido(rpP);
       if (!forP) soma(repasses, catParcela(p), n(rpP.VALOR));
@@ -7307,7 +7321,9 @@ function dadosDRE(mes, grupo){
     .filter(c => doGrupo(c.CATEGORIA))
     .forEach(c => {
       const cat = c.CATEGORIA || '—';
-      soma(receitas, cat, rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA)));
+      const vc = rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA));
+      soma(receitas, cat, vc);
+      somaSub(subRec, cat, c.SUBCATEGORIA, vc);
       const rpC = repasseDe(c);
       const forC = repasseNaoDevido(rpC);
       if (!forC) soma(repasses, cat, n(rpC.VALOR));
@@ -7317,12 +7333,16 @@ function dadosDRE(mes, grupo){
 
   (DB.CONTAS_PAGAR||[]).filter(c => c.CATEGORIA !== 'Repasse a cliente' && noMes(c.VENCIMENTO))
     .filter(c => doGrupo(c.CATEGORIA))
-    .forEach(c => soma(despesas, c.CATEGORIA || 'Outras despesas', n(c.VALOR)));
+    .forEach(c => {
+      const cat = c.CATEGORIA || 'Outras despesas';
+      soma(despesas, cat, n(c.VALOR));
+      somaSub(subDesp, cat, c.SUBCATEGORIA, n(c.VALOR));
+    });
 
   const bruta = rd(Object.values(receitas).reduce((s,v) => s + v, 0) + tarifas);
   const totDesp = rd(Object.values(despesas).reduce((s,v) => s + v, 0));
-  return { receitas, despesas, repasses, tarifas, bruta, totDesp, resultado: rd(bruta - totDesp),
-           repFora: fora,
+  return { receitas, despesas, subRec, subDesp, repasses, tarifas, bruta, totDesp,
+           resultado: rd(bruta - totDesp), repFora: fora,
            totRepasses: rd(Object.values(repasses).reduce((s,v) => s + v, 0)) };
 }
 
@@ -7645,9 +7665,9 @@ function drePariticular(mes){
     + (cats.length ? '' : 'nenhuma categoria marcada como particular')
     + '. Essas categorias ficam fora do DRE do escritório e da aba Comparar meses. '
     + 'A lista é editável em Configurações → Geral.</p></div></div>'
-    + dreResultado(mes, GRUPO_PARTICULAR);
+    + dreResultado(mes, GRUPO_PARTICULAR, true);
 }
-function dreResultado(mes, grupo){
+function dreResultado(mes, grupo, comSub){
   const d = dadosDRE(mes, grupo);
   const aberto = pendentesReceber();
   const escAberto = aberto.reduce((s,p) => { const l = lancDe(p.LANC_ID);
@@ -7659,7 +7679,25 @@ function dreResultado(mes, grupo){
     const abre = drill ? ' class="abrir" onclick="detalheDRE(\'' + esc(drill).replace(/'/g,"\\'") + '\')"' : '';
     return '<tr class="'+(cls||'')+'"'+(drill?' style="cursor:pointer"':'')
       + '><td'+abre+'>'+esc(rot)+(drill?' <span class="lupa">›</span>':'')+'</td>'
-      + '<td class="num'+(n(v)<0?' neg':'')+'"'+abre+'>'+nMoeda(v)+'</td></tr>';
+      // a célula do valor tinha dois atributos class e o navegador descartava o
+      // segundo: o "abrir" entra junto do "num", num atributo só
+      + '<td class="num'+(n(v)<0?' neg':'')+(drill?' abrir':'')+'"'
+      + (drill ? ' onclick="detalheDRE(\'' + esc(drill).replace(/'/g,"\\'") + '\')"' : '')
+      + '>'+nMoeda(v)+'</td></tr>';
+  };
+  /* Linhas de subcategoria sob a categoria, da maior para a menor. Só entram
+     quando a tela pede (hoje, a aba Particular) e quando há mais de uma, ou
+     uma que não seja a "sem subcategoria" — repetir a categoria com outro nome
+     não informa nada. O drill-down continua sendo o da categoria. */
+  const subLinhas = (mapa, cat, sinal, drill) => {
+    if (!comSub) return '';
+    const m2 = (mapa||{})[cat] || {};
+    const chaves = Object.keys(m2);
+    if (!chaves.length) return '';
+    if (chaves.length === 1 && chaves[0] === '— sem subcategoria —') return '';
+    return chaves
+      .sort((a2,b2) => Math.abs(n(m2[b2])) - Math.abs(n(m2[a2])) || String(a2).localeCompare(String(b2),'pt-BR'))
+      .map(k => li(k, sinal * n(m2[k]), 'recuo2', drill)).join('');
   };
   const catsRec = linhasCategoria(categoriasDoGrupo('C', grupo), d.receitas);
   const catsDesp = linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'), d.despesas);
@@ -7674,14 +7712,28 @@ function dreResultado(mes, grupo){
     + '<div class="card"><h3>' + esc(rotuloDRE(grupo)) + ' — ' + (mes ? mesBR(mes) : 'todo o período') + '</h3><div class="tw">'
     + '<table class="dre"><tbody>'
     + li('Receita bruta', d.bruta, 'nivel1')
-    + catsRec.map(c => li(c, d.receitas[c] || 0, 'recuo', 'receita|' + c)).join('')
-    + li('Tarifas bancárias repassadas ao escritório', d.tarifas, 'recuo', 'tarifas')
+    + catsRec.map(c => li(c, d.receitas[c] || 0, 'recuo', 'receita|' + c)
+        + subLinhas(d.subRec, c, 1, 'receita|' + c)).join('')
+    /* A linha de tarifa só aparece quando houve tarifa. No DRE particular ela
+       vinha sempre, zerada: é um conceito do recebimento de cliente — a tarifa
+       sai da parte do cliente e entra na do escritório — e não tem o que fazer
+       ali. Esconder só quando é zero mantém a soma das linhas igual à receita
+       bruta nos casos em que existe. */
+    + (n(d.tarifas) ? li('Tarifas bancárias repassadas ao escritório', d.tarifas, 'recuo', 'tarifas') : '')
     + li('Despesas operacionais', -d.totDesp, 'nivel1')
-    + catsDesp.map(c => li(c, -(d.despesas[c] || 0), 'recuo', 'despesa|' + c)).join('')
+    + catsDesp.map(c => li(c, -(d.despesas[c] || 0), 'recuo', 'despesa|' + c)
+        + subLinhas(d.subDesp, c, -1, 'despesa|' + c)).join('')
     + li('Resultado do período', d.resultado, 'total')
     + '</tbody></table></div>'
-    + '<div class="corpo" style="border-top:1px solid var(--line2)">'
+    /* O quadro de terceiros só aparece quando há repasse a cliente. No DRE
+       particular nunca há — não existe cliente ali —, e um quadro zerado com
+       esse nome só levantava a pergunta "o que é isto?". */
+    + (!d.totRepasses && !Object.keys(d.repasses).length && !Object.keys(d.repFora||{}).length ? '' :
+      '<div class="corpo" style="border-top:1px solid var(--line2)">'
     + '<h3 style="border:0;padding:0 0 8px;font-size:12px;color:var(--ink2)">Contas de terceiros (fora do resultado)</h3>'
+    + '<p class="mini" style="margin:-4px 0 8px">O que o cliente recebeu do acordo passa pela conta do '
+    + 'escritório mas não é receita dele: é dinheiro de terceiro, só em trânsito. Por isso fica fora do '
+    + 'resultado acima e aparece aqui, separado.</p>'
     + '<table class="dre"><tbody>'
     + li('Repasses devidos aos clientes', d.totRepasses, 'nivel1')
     + catsRep.map(c => li(c, d.repasses[c] || 0, 'recuo', 'repasse|' + c)).join('')
@@ -7691,7 +7743,8 @@ function dreResultado(mes, grupo){
     + '<p class="mini" style="margin:8px 0 0"><b>Resultado do período REAL</b> = resultado do período '
     + moeda(d.resultado) + ' menos os repasses devidos aos clientes ' + moeda(d.totRepasses)
     + ' — é o que sobra depois de separar o dinheiro que é de terceiros.</p>'
-    + '</div></div>'
+    + '</div>')
+    + '</div>'
     + '<p class="mini" style="margin:-6px 0 14px">Clique em qualquer linha para ver as contas que formam o total.</p>'
     + graficoMeses(grupo);
 }
@@ -7768,14 +7821,18 @@ function dreComparativo(grupo){
       + '<table class="dre densa"><thead><tr><th></th>'
       + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
       + '<th class="num">Variação</th></tr></thead><tbody>'
-      + linha('Valor enviado para aplicação', aplicado, '', 'despesa|'+catAplicacao())
-      + linha('Resgate de aplicação', resgatado, '', 'receita|'+catResgate())
+      // as linhas levam o nome da categoria como está cadastrada, para bater
+      // com o que se vê em contas a pagar e a receber; o que cada uma
+      // significa fica na nota abaixo
+      + linha(catAplicacao(), aplicado, '', 'despesa|'+catAplicacao())
+      + linha(catResgate(), resgatado, '', 'receita|'+catResgate())
       + linha('Resultado das aplicações no mês',
               aplicado.map((v,i) => rd(v - resgatado[i])), 'total')
       + '</tbody></table></div>'
-      + '<p class="mini" style="margin-top:8px">Enviado menos resgatado: positivo é quanto ficou aplicado '
-      + 'no mês, negativo é quanto voltou da aplicação para a conta do dia a dia. '
-      + '<b>' + esc(catAplicacao()) + '</b> é o valor enviado e <b>' + esc(catResgate()) + '</b> o resgate.</p>'
+      + '<p class="mini" style="margin-top:8px"><b>' + esc(catAplicacao()) + '</b> é o valor enviado para '
+      + 'a aplicação e <b>' + esc(catResgate()) + '</b> é o resgate. O resultado é o enviado menos o '
+      + 'resgatado: positivo é quanto ficou aplicado no mês, negativo é quanto voltou da aplicação para '
+      + 'a conta do dia a dia.</p>'
       + '</div>')
     + '<p class="mini">A coluna de variação compara o último mês com o anterior. '
     + 'Clique em qualquer valor para ver as contas daquele mês.'
