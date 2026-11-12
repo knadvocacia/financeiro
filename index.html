@@ -333,7 +333,8 @@ table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
       <button id="net" class="net" onclick="salvarAgora()" title="Situação da gravação — clique para salvar agora"><i></i><span>Conectando…</span></button>
       <div class="quem"><b id="hdUser"></b><br><span id="hdPerfil"></span></div>
       <button class="icobtn" title="Atualizar dados" onclick="carregar(true)">↻</button>
-      <button class="icobtn" title="Configurações" onclick="abrirConfig()">⚙</button>
+      <button class="icobtn" id="btNuvem" title="Conferência com a nuvem" onclick="abrirNuvem()">☁</button>
+      <button class="icobtn" id="btConfig" title="Configurações" onclick="abrirConfig()">⚙</button>
       <button class="icobtn" title="Sair" onclick="sair()">⏻</button>
     </div>
   </header>
@@ -352,7 +353,7 @@ table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v13.7';
+const VERSAO_APP = 'v14.1';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -990,6 +991,16 @@ function marcarModoConsulta(){
   if (b2 && b2.classList) b2.classList[soLeitura() ? 'add' : 'remove']('consulta');
   const p2 = document.getElementById('hdPerfil');
   if (p2 && soLeitura()) p2.textContent = 'CONSULTA · só leitura';
+  pintarBotoesTopo();
+}
+/* botão que o usuário não pode usar não fica na tela só para dar recado de erro */
+function pintarBotoesTopo(){
+  const mostra = (id, ok) => {
+    const e = document.getElementById(id);
+    if (e) e.style.display = ok ? '' : 'none';
+  };
+  mostra('btConfig', podeVer('config') && !soLeitura());
+  mostra('btNuvem', podeConferir());
 }
 /* trava o clique antes de abrir a ação, no perfil de consulta */
 function travarCliquesConsulta(){
@@ -1004,6 +1015,11 @@ function travarCliquesConsulta(){
     bloqueiaConsulta();
   }, true);
 }
+/* A conferência com a nuvem saiu de dentro das configurações e ganhou botão
+   próprio no topo: dá para liberar só ela para quem cuida do financeiro, sem
+   abrir o resto. Quem já tem configurações continua tendo, sem precisar marcar
+   a permissão nova em cada usuário antigo. */
+const podeConferir = () => podeVer('conferencia') || podeVer('config');
 /* o usuário só enxerga as abas liberadas para ele; TODAS libera tudo */
 function podeVer(k){
   const abas = String((USER && USER.ABAS) || 'TODAS');
@@ -1580,7 +1596,7 @@ const ABAS_SISTEMA = [
   ['conciliacao','Conciliação bancária'], ['corrente','Conta corrente'], ['lancamentos','Lançamentos'],
   ['receber','Contas a receber'], ['recebidas','Contas recebidas'], ['pagar','Contas a pagar'],
   ['pagas','Contas pagas'], ['comissoes','Comissões'], ['painel','Painel e DRE'], ['resumo','Resumo'],
-  ['config','Configurações']
+  ['config','Configurações'], ['conferencia','Conferência com a nuvem']
 ];
 const abasDoUsuario = u => String((u && u.ABAS) || '').toUpperCase() === 'TODAS' ? ABAS_SISTEMA.map(a => a[0])
   : String((u && u.ABAS) || '').split('|').filter(Boolean);
@@ -1622,6 +1638,8 @@ function formUsuario(id){
     + '<div class="campo"><label for="usAtivo">Situação</label><select id="usAtivo"><option value="SIM">Ativo</option>'
       + '<option value="NAO"'+(u.ATIVO==='NAO'?' selected':'')+'>Inativo</option></select></div>'
     + '<div class="secao-form">Abas que este usuário pode acessar</div>'
+    + '<p class="mini full" style="margin:-6px 0 4px">A <b>conferência com a nuvem</b> é o botão ☁ do topo '
+    + 'e pode ser liberada sozinha, sem dar acesso às configurações.</p>'
     + '<div class="check full"><input type="checkbox" id="usTodas"'+(todas?' checked':'')+' onchange="alternarTodasAbas(this.checked)">'
       + '<label for="usTodas">Todas as abas, inclusive as que forem criadas depois</label></div>'
     + '<div class="full" id="boxAbas" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px">'
@@ -1727,15 +1745,21 @@ const ehCatEscritorio = nome => catsEscritorio().indexOf(chaveCat(nome)) > -1;
 /* ── Aplicações financeiras: transferência entre contas próprias ───────────
    Mandar dinheiro para a conta de aplicação não é despesa, e resgatar não é
    receita: o dinheiro continua sendo do escritório, só mudou de conta. Em
-   "Comparar meses" essas duas categorias saem das linhas de receita e despesa
+   na aba DRE essas duas categorias saem das linhas de receita e despesa
    e formam um quadro próprio, onde enviado menos resgatado mostra quanto ficou
-   aplicado no mês. Os nomes são editáveis em Configurações → Geral. */
-const CAT_APLICACAO_PADRAO = 'Transferência Conta 2';   // saída para a aplicação
-const CAT_RESGATE_PADRAO   = 'Crédito Conta 2';         // volta da aplicação
-const catAplicacao = () => String(cfg('CATEGORIA_APLICACAO', CAT_APLICACAO_PADRAO)).trim();
-const catResgate   = () => String(cfg('CATEGORIA_RESGATE', CAT_RESGATE_PADRAO)).trim();
-const ehCatAplicacao = nome => !!catAplicacao() && mesmaCategoria(nome, catAplicacao());
-const ehCatResgate   = nome => !!catResgate()   && mesmaCategoria(nome, catResgate());
+   aplicado no mês. Os nomes são editáveis em Configurações → Geral.
+   Cada campo aceita vários nomes separados por vírgula, e os nomes de fábrica
+   valem sempre junto com o que estiver gravado: a mesma conta já foi chamada
+   de "Transferência Conta 2" e de "Aplicação" aqui, e quem renomeia a
+   categoria não tem de lembrar de vir mexer na configuração. */
+const CAT_APLICACAO_PADRAO = 'Transferência Conta 2, Aplicação';   // saída para a aplicação
+const CAT_RESGATE_PADRAO   = 'Crédito Conta 2, Resgate Aplicação'; // volta da aplicação
+const listaCats = (chave, padrao) => [...new Set(
+  (String(cfg(chave, padrao)) + ',' + padrao).split(/[,;|]/).map(chaveCat).filter(Boolean))];
+const catsAplicacao = () => listaCats('CATEGORIA_APLICACAO', CAT_APLICACAO_PADRAO);
+const catsResgate   = () => listaCats('CATEGORIA_RESGATE', CAT_RESGATE_PADRAO);
+const ehCatAplicacao = nome => catsAplicacao().indexOf(chaveCat(nome)) > -1;
+const ehCatResgate   = nome => catsResgate().indexOf(chaveCat(nome)) > -1;
 const ehCatConta2 = nome => ehCatAplicacao(nome) || ehCatResgate(nome);
 /* soma as chaves de um mapa de categorias que passam no teste */
 const somaCats = (mapa, teste) => rd(Object.keys(mapa||{})
@@ -2027,8 +2051,8 @@ function cfgGeral(){
     + inp('cgParticular','Categorias do DRE particular', cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO), 'full')
     + inp('cgParcValor','Categorias com valor por parcela', cfg('CATEGORIAS_PARC_VALOR', CATS_PARC_VALOR_PADRAO), 'full')
     + inp('cgSoEsc','Categorias 100% do escritório (sem rateio com o cliente)', cfg('CATEGORIAS_ESCRITORIO', CATS_ESCRITORIO_PADRAO), 'full')
-    + inp('cgAplic','Categoria de envio para aplicação (conta 2)', cfg('CATEGORIA_APLICACAO', CAT_APLICACAO_PADRAO))
-    + inp('cgResg','Categoria de resgate da aplicação (conta 2)', cfg('CATEGORIA_RESGATE', CAT_RESGATE_PADRAO))
+    + inp('cgAplic','Categorias de envio para aplicação (conta 2)', cfg('CATEGORIA_APLICACAO', CAT_APLICACAO_PADRAO))
+    + inp('cgResg','Categorias de resgate da aplicação (conta 2)', cfg('CATEGORIA_RESGATE', CAT_RESGATE_PADRAO))
     + inp('cgPadTarifa','Termos que indicam tarifa no extrato', cfg('PADROES_TARIFA', PADROES_TARIFA_PADRAO), 'full')
     + inp('cgCatTarifa','Categoria das tarifas bancárias', cfg('CATEGORIA_TARIFA', CAT_TARIFA_PADRAO))
     + inp('cgPctNI','% dos depósitos não identificados no resultado real', cfg('PCT_NAO_IDENT','30'))
@@ -2056,12 +2080,6 @@ function cfgGeral(){
     + 'seguinte: com 1, o que venceu no último dia útil aparece como <i>em conciliação</i>, e não como vencido '
     + 'ou não recebido. Com 0, a cobrança volta a valer já no dia seguinte ao vencimento.</p>'
     + '<div style="margin-top:14px"><button class="btn" onclick="gravarGeral()">Salvar configurações</button></div>'
-    + '<div class="secao-form" style="margin-top:22px">Conferência com a nuvem</div>'
-    + '<p class="mini">Compara o que está na tela com o que existe de fato na planilha do Google, '
-    + 'aba por aba. Serve para confirmar que nada ficou pelo caminho.</p>'
-    + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
-    + '<button class="btn" onclick="conferirNuvem()">Conferir com a nuvem</button>'
-    + '<button class="btn sec" onclick="testarConexao()">Testar conexão</button></div>'
     + '<div class="secao-form" style="margin-top:22px">Manutenção da base</div>'
     + '<p class="mini">Procura registros que perderam a origem — parcelas sem lançamento, repasses sem parcela, '
     + 'comissões sem recebimento — e mostra um relatório antes de limpar.</p>'
@@ -2146,6 +2164,22 @@ async function testarConexao(){
 }
 
 /* confronta a tela com a planilha, linha por linha de cada aba */
+/* Tela própria da conferência: o mesmo conteúdo que ficava no fim das
+   configurações, agora acessível sem passar por elas. Os botões são "sec"
+   para o perfil de consulta também poder conferir — nada aqui grava. */
+function abrirNuvem(){
+  if (!podeConferir()) return toast('Seu usuário não tem acesso à conferência com a nuvem.','erro');
+  modal('Conferência com a nuvem',
+    '<p class="mini" style="margin:0 0 10px">Compara o que está na tela com o que existe de fato na '
+    + 'planilha do Google, aba por aba. Serve para confirmar que nada ficou pelo caminho.</p>'
+    + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+    + '<button class="btn sec" onclick="conferirNuvem()">Conferir com a nuvem</button>'
+    + '<button class="btn sec" onclick="testarConexao()">Testar conexão</button></div>'
+    + '<p class="mini" style="margin:12px 0 0">A <b>conferência</b> conta os registros de cada aba nos '
+    + 'dois lados e aponta as diferenças. O <b>teste de conexão</b> só verifica se a planilha responde — '
+    + 'use quando algum lançamento parecer que não subiu.</p>',
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'estreita');
+}
 async function conferirNuvem(){
   carregandoOn('Conferindo com a planilha…');
   try{
@@ -7634,11 +7668,10 @@ function telaPainel(){
   const sub = SUB || 'indicadores';
 
   const topoPart = cabec('Painel e DRE',
-      'Aba Particular: o que não é do escritório — fica fora do DRE e do comparativo.',
+      'Aba Particular: o que não é do escritório — fica fora do DRE do escritório.',
       '<button class="btn sec" onclick="exportarCSV(\'dre\')">Exportar CSV</button>')
     + '<div class="filtros">' + selMes('fMesD', mes) + '</div>'
-    + subtabs([['indicadores','Painel'],['resultado','DRE'],['comparativo','Comparar meses'],
-               ['agendado','Realizado x agendado'],['particular','Particular']]);
+    + subtabs(ABAS_DRE);
 
   const topo = cabec('Painel e DRE',
       'Resultado por regime de caixa. Repasses aos clientes são recursos de terceiros e ficam fora do resultado.',
@@ -7648,21 +7681,20 @@ function telaPainel(){
         ? sel('fGrupo','DRE', grupos.map(g => [g, rotuloDRE(g)]), grupo, '', 'onchange="setF(\'fGrupo\',this.value)"')
         : '')
     + '</div>'
-    + subtabs([['indicadores','Painel'],['resultado','DRE'],['comparativo','Comparar meses'],
-               ['agendado','Realizado x agendado'],['particular','Particular']]);
+    + subtabs(ABAS_DRE);
 
-  if (sub === 'resultado') return topo + dreResultado(mes, grupo);
-  if (sub === 'comparativo') return topo + dreComparativo(grupo);
+  // 'resultado' era a aba DRE do mês, que saiu: quem chegar nela cai no DRE
+  if (sub === 'comparativo' || sub === 'resultado') return topo + dreComparativo(grupo);
   if (sub === 'agendado') return topo + dreAgendado(mes, grupo);
   if (sub === 'particular') return topoPart + drePariticular(mes);
   return topo + painelIndicadores(mes);
 }
 
 /* ── Aba Particular ──
-   O que não é do escritório: receita e despesa pessoais. Usa o mesmo DRE das
-   outras abas, só apontado para o grupo Particular, e mostra quais categorias
-   o compõem — assim fica claro por que uma categoria está aqui e não no
-   comparativo, e onde mudar isso. */
+   O que não é do escritório: receita e despesa pessoais. É a mesma tela da aba
+   DRE — mês a mês, com as subcategorias abertas —, só apontada para o grupo
+   Particular, e mostra quais categorias o compõem: assim fica claro por que uma
+   categoria está aqui e não no DRE do escritório, e onde mudar isso. */
 function drePariticular(mes){
   const cats = String(cfg('CATEGORIAS_PARTICULAR', CATS_PARTICULAR_PADRAO))
     .split(/[,;|]/).map(x => x.trim()).filter(Boolean);
@@ -7674,9 +7706,9 @@ function drePariticular(mes){
     + (rec.length && desp.length ? ' · ' : '')
     + (desp.length ? '<b>despesas</b> ' + esc(desp.join(', ')) : '')
     + (cats.length ? '' : 'nenhuma categoria marcada como particular')
-    + '. Essas categorias ficam fora do DRE do escritório e da aba Comparar meses. '
+    + '. Essas categorias ficam fora do DRE do escritório. '
     + 'A lista é editável em Configurações → Geral.</p></div></div>'
-    + dreResultado(mes, GRUPO_PARTICULAR, true);
+    + dreComparativo(GRUPO_PARTICULAR, true);
 }
 function dreResultado(mes, grupo, comSub){
   const d = dadosDRE(mes, grupo);
@@ -7686,14 +7718,19 @@ function dreResultado(mes, grupo, comSub){
   const cpAberto = (DB.CONTAS_PAGAR||[]).filter(c => c.STATUS !== 'Pago').reduce((s,c) => s + n(c.VALOR), 0);
   const pendConc = (DB.EXTRATO||[]).filter(m => m.STATUS === 'Pendente').length;
 
+  /* O detalhe leva o grupo da tela: na aba Particular um clique não pode trazer
+     conta do escritório, e vice-versa. Sem isso, a linha de tarifas abria todas
+     as receitas do escritório mesmo clicada no DRE particular. */
   const li = (rot, v, cls, drill) => {
-    const abre = drill ? ' class="abrir" onclick="detalheDRE(\'' + esc(drill).replace(/'/g,"\\'") + '\')"' : '';
+    const arg = drill ? '\'' + esc(drill).replace(/'/g,"\\'") + '\',\''
+                        + esc(grupo).replace(/'/g,"\\'") + '\'' : '';
+    const abre = drill ? ' class="abrir" onclick="detalheDRE('+arg+')"' : '';
     return '<tr class="'+(cls||'')+'"'+(drill?' style="cursor:pointer"':'')
       + '><td'+abre+'>'+esc(rot)+(drill?' <span class="lupa">›</span>':'')+'</td>'
       // a célula do valor tinha dois atributos class e o navegador descartava o
       // segundo: o "abrir" entra junto do "num", num atributo só
       + '<td class="num'+(n(v)<0?' neg':'')+(drill?' abrir':'')+'"'
-      + (drill ? ' onclick="detalheDRE(\'' + esc(drill).replace(/'/g,"\\'") + '\')"' : '')
+      + (drill ? ' onclick="detalheDRE('+arg+')"' : '')
       + '>'+nMoeda(v)+'</td></tr>';
   };
   /* Linhas de subcategoria sob a categoria, da maior para a menor. Só entram
@@ -7774,7 +7811,15 @@ function notaForaRepasse(fora){
            .map(k => moeda(n(fora[k])) + ' ' + esc(k)).join(' · ') + '.</p>';
 }
 
-function dreComparativo(grupo){
+/* A aba DRE é o mês a mês, e a aba Particular é a mesma tela para o grupo
+   Particular. A antiga aba "DRE" (um mês só, em coluna) saiu: mostrava o mesmo
+   número duas vezes, e o mês isolado já está no Painel. dreResultado, que a
+   desenhava, ficou sem aba — é a única tela do quadro de contas de terceiros e
+   do Resultado REAL, e segue coberta por testes à espera de voltar ao pé do
+   DRE se fizer falta. */
+const ABAS_DRE = [['indicadores','Painel'],['comparativo','DRE'],
+                  ['agendado','Realizado x agendado'],['particular','Particular']];
+function dreComparativo(grupo, comSub){
   const qtd = parseInt(FILTROS.fComp) || 6;
   const meses = [];
   const base = new Date(); base.setDate(1);
@@ -7787,11 +7832,19 @@ function dreComparativo(grupo){
      O filtro vai depois de linhasCategoria porque ela junta as categorias
      cadastradas com as que aparecem no movimento — tirar só da lista de
      entrada deixaria a categoria voltar pela porta dos dados. */
-  const catsRec = linhasCategoria(categoriasDoGrupo('C', grupo),
-    somarMapas.apply(null, dados.map(d => d.receitas))).filter(c => !ehCatConta2(c));
-  const catsDesp = linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'),
-    somarMapas.apply(null, dados.map(d => d.despesas))).filter(c => !ehCatConta2(c));
-  // e também dos totais, senão as linhas não somariam o que o total mostra
+  const mapaRec  = somarMapas.apply(null, dados.map(d => d.receitas));
+  const mapaDesp = somarMapas.apply(null, dados.map(d => d.despesas));
+  // nesta aba a ordem é alfabética: aqui se procura uma categoria pelo nome,
+  // não a maior do mês, e a ordem por valor muda a cada mês novo
+  const az = l => l.slice().sort((a2,b2) => String(a2).localeCompare(String(b2),'pt-BR'));
+  const catsRec = az(linhasCategoria(categoriasDoGrupo('C', grupo), mapaRec)
+    .filter(c => !ehCatConta2(c)));
+  const catsDesp = az(linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'),
+    mapaDesp).filter(c => !ehCatConta2(c)));
+  // as de conta 2 descem para o quadro das aplicações, com o nome que têm no
+  // cadastro — e saem também dos totais, senão as linhas não somariam o total
+  const catsAplic = az(linhasCategoria(categoriasDoGrupo('D', grupo), mapaDesp).filter(ehCatAplicacao));
+  const catsResg  = az(linhasCategoria(categoriasDoGrupo('C', grupo), mapaRec).filter(ehCatResgate));
   const resgatado = dados.map(d => somaCats(d.receitas, ehCatResgate));
   const aplicado  = dados.map(d => somaCats(d.despesas, ehCatAplicacao));
   const temConta2 = resgatado.concat(aplicado).some(v => v);
@@ -7805,26 +7858,53 @@ function dreComparativo(grupo){
     const p = rd((b - a) / Math.abs(a) * 100);
     return '<span class="'+(p>=0?'pos':'neg')+'">'+(p>0?'+':'')+nMoeda(p)+'%</span>';
   };
+  const arg = d2 => '\'' + esc(d2).replace(/'/g,"\\'") + '\',\''
+                     + esc(grupo).replace(/'/g,"\\'") + '\'';
+  /* O valor de um mês abre as contas daquele mês; o NOME da categoria abre o
+     período inteiro que está na tela, que é o que se quer ao olhar a evolução
+     e achar o mês fora da curva. */
   const linha = (rot, vals, cls, drill) => {
-    const cel = (v,i) => '<td class="num'+(v<0?' neg':'')+'"'
-      + (drill ? ' style="cursor:pointer" onclick="verMesDRE(\''+meses[i]+'\',\''+esc(drill).replace(/'/g,"\\'")+'\')"' : '')
+    const cel = (v,i) => '<td class="num'+(v<0?' neg':'')+(drill?' abrir':'')+'"'
+      + (drill ? ' style="cursor:pointer" onclick="verMesDRE(\''+meses[i]+'\','+arg(drill)+')"' : '')
       + '>'+nMoeda(v)+'</td>';
-    return '<tr class="'+(cls||'')+'"><td>'+esc(rot)+'</td>' + vals.map(cel).join('')
+    const nome = drill
+      ? '<td class="abrir" style="cursor:pointer" onclick="detalheDRE('+arg(drill)+',\''
+        + meses[0] + '\',\'' + meses[meses.length-1] + '\')">'
+        + esc(rot) + ' <span class="lupa">›</span></td>'
+      : '<td>'+esc(rot)+'</td>';
+    return '<tr class="'+(cls||'')+'">'+nome + vals.map(cel).join('')
       + '<td class="num">'+varia(vals)+'</td></tr>';
+  };
+  /* As subcategorias por mês, logo abaixo da categoria (hoje só a aba
+     Particular pede). Só entram quando há mais de uma, ou uma que não seja a
+     "sem subcategoria": repetir a categoria com outro nome não informa nada. */
+  const subLinhas = (campo, cat, sinal, drill) => {
+    if (!comSub) return '';
+    const porMes = dados.map(d => (d[campo] || {})[cat] || {});
+    const chaves = [...new Set(porMes.reduce((l,m) => l.concat(Object.keys(m)), []))];
+    if (!chaves.length) return '';
+    if (chaves.length === 1 && chaves[0] === '— sem subcategoria —') return '';
+    return chaves.sort((a2,b2) => String(a2).localeCompare(String(b2),'pt-BR'))
+      .map(k => linha(k, porMes.map(m => sinal * n(m[k])), 'recuo2', drill)).join('');
   };
 
   return '<div class="filtros">'
     + sel('fComp','Meses comparados', [[3,'Últimos 3'],[6,'Últimos 6'],[12,'Últimos 12']], String(qtd), '', 'onchange="setF(\'fComp\',this.value)"')
     + '</div>'
-    + '<div class="card"><h3>' + esc(grupo) + ' — evolução mês a mês</h3><div class="tw">'
+    + '<div class="card"><h3>' + esc(rotuloDRE(grupo)) + ' — evolução mês a mês</h3><div class="tw">'
     + '<table class="dre densa"><thead><tr><th></th>'
     + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
     + '<th class="num">Variação</th></tr></thead><tbody>'
     + linha('Receita bruta', bruta, 'nivel1')
-    + catsRec.map(c => linha(c, dados.map(d => d.receitas[c] || 0), 'recuo', 'receita|'+c)).join('')
-    + linha('Tarifas bancárias', dados.map(d => d.tarifas), 'recuo', 'tarifas')
+    + catsRec.map(c => linha(c, dados.map(d => d.receitas[c] || 0), 'recuo', 'receita|'+c)
+        + subLinhas('subRec', c, 1, 'receita|'+c)).join('')
+    /* A tarifa é um conceito do recebimento de cliente — sai da parte do
+       cliente e entra na do escritório. No DRE particular não existe, e a linha
+       vinha zerada só atrapalhando. */
+    + (dados.some(d => n(d.tarifas)) ? linha('Tarifas bancárias', dados.map(d => d.tarifas), 'recuo', 'tarifas') : '')
     + linha('Despesas operacionais', desp.map(v => -v), 'nivel1')
-    + catsDesp.map(c => linha(c, dados.map(d => -(d.despesas[c] || 0)), 'recuo', 'despesa|'+c)).join('')
+    + catsDesp.map(c => linha(c, dados.map(d => -(d.despesas[c] || 0)), 'recuo', 'despesa|'+c)
+        + subLinhas('subDesp', c, -1, 'despesa|'+c)).join('')
     + linha('Resultado', result, 'total')
     + '</tbody></table></div></div>'
     + (!temConta2 ? '' :
@@ -7832,28 +7912,34 @@ function dreComparativo(grupo){
       + '<table class="dre densa"><thead><tr><th></th>'
       + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
       + '<th class="num">Variação</th></tr></thead><tbody>'
-      // as linhas levam o nome da categoria como está cadastrada, para bater
+      // uma linha por categoria, com o nome que ela tem no cadastro, para bater
       // com o que se vê em contas a pagar e a receber; o que cada uma
       // significa fica na nota abaixo
-      + linha(catAplicacao(), aplicado, '', 'despesa|'+catAplicacao())
-      + linha(catResgate(), resgatado, '', 'receita|'+catResgate())
+      + catsAplic.map(c => linha(c, dados.map(d => d.despesas[c] || 0), '', 'despesa|'+c)).join('')
+      + catsResg.map(c => linha(c, dados.map(d => d.receitas[c] || 0), '', 'receita|'+c)).join('')
+      + (catsAplic.length > 1 ? linha('Enviado para aplicação', aplicado, 'nivel1') : '')
+      + (catsResg.length > 1 ? linha('Resgatado', resgatado, 'nivel1') : '')
       + linha('Resultado das aplicações no mês',
               aplicado.map((v,i) => rd(v - resgatado[i])), 'total')
       + '</tbody></table></div>'
-      + '<p class="mini" style="margin-top:8px"><b>' + esc(catAplicacao()) + '</b> é o valor enviado para '
-      + 'a aplicação e <b>' + esc(catResgate()) + '</b> é o resgate. O resultado é o enviado menos o '
+      + '<p class="mini" style="margin-top:8px">'
+      + (catsAplic.length ? '<b>' + esc(catsAplic.join(', ')) + '</b> é o valor enviado para a aplicação' : '')
+      + (catsAplic.length && catsResg.length ? ' e ' : '')
+      + (catsResg.length ? '<b>' + esc(catsResg.join(', ')) + '</b> é o resgate' : '')
+      + '. O resultado é o enviado menos o '
       + 'resgatado: positivo é quanto ficou aplicado no mês, negativo é quanto voltou da aplicação para '
       + 'a conta do dia a dia.</p>'
       + '</div>')
     + '<p class="mini">A coluna de variação compara o último mês com o anterior. '
-    + 'Clique em qualquer valor para ver as contas daquele mês.'
+    + 'Clique no valor para ver as contas daquele mês, ou no nome da categoria para ver '
+    + 'todas as do período.'
     + (temConta2 ? ' Transferências entre contas próprias ficam no quadro de aplicações e '
         + 'não entram na receita, na despesa nem no resultado acima — o dinheiro só mudou de conta.' : '')
     + '</p>';
 }
-function verMesDRE(mes, chave){
+function verMesDRE(mes, chave, grupo){
   FILTROS.fMesD = mes;
-  detalheDRE(chave);
+  detalheDRE(chave, grupo);
 }
 
 function dreAgendado(mes, grupo){
@@ -7916,10 +8002,23 @@ function graficoMeses(grupo){
 }
 
 /* ── Detalhe de uma linha do DRE ── */
-function detalheDRE(chave){
-  const mes = FILTROS.fMesD || mesDe(hoje());
-  const grupo = FILTROS.fGrupo || GRUPO_PADRAO;
-  const noMes = d => !mes || mesDe(d) === mes;
+/* mesIni/mesFim abrem o período inteiro do comparativo; sem eles, o mês do
+   filtro, como antes. */
+function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
+  const periodo = !!(mesIni && mesFim);
+  const mes = periodo ? '' : (FILTROS.fMesD || mesDe(hoje()));
+  const rotuloPer = periodo
+    ? (mesIni === mesFim ? mesBR(mesIni) : mesBR(mesIni) + ' a ' + mesBR(mesFim))
+    : (mes ? mesBR(mes) : 'todo o período');
+  const grupo = grupoDaTela || FILTROS.fGrupo || GRUPO_PADRAO;
+  /* A categoria clicada e nada mais. A comparação é tolerante a acento, caixa e
+     ponto porque o nome vem do cadastro e os registros antigos podem tê-lo
+     escrito de outro jeito — e o grupo tem de ser o da tela clicada. */
+  const soA = (c, alvo) => mesmaCategoria(c, alvo) && grupoDaCat(c) === grupo;
+  const noMes = d => {
+    if (periodo){ const m = mesDe(d); return !!m && m >= mesIni && m <= mesFim; }
+    return !mes || mesDe(d) === mes;
+  };
   const partes = String(chave).split('|');
   const tipo = partes[0], cat = partes.slice(1).join('|');
   const catParcela = p => p.TIPO === 'Sucumbência' ? 'Sucumbência' : (lancDe(p.LANC_ID).SUBCLASSE || '—');
@@ -7937,14 +8036,14 @@ function detalheDRE(chave){
       return m ? '<span class="tag t-pend">'+esc(m)+'</span>'
                : '<span class="tag t-ok">em aberto</span>'
                  + (cp.VENCIMENTO ? ' <span class="mini">venc '+dataBR(cp.VENCIMENTO)+'</span>' : ''); };
-    recb.filter(p => catParcela(p) === cat).forEach(p => {
+    recb.filter(p => soA(catParcela(p), cat)).forEach(p => {
       const cp = repasseDe(p), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
       total += entra; const l = lancDe(p.LANC_ID);
       linhas.push([dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
                    esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
                    sit(cp), entra ? nMoeda(entra) : '—']);
     });
-    crRec.filter(c => (c.CATEGORIA || '—') === cat).forEach(c => {
+    crRec.filter(c => soA(c.CATEGORIA || '—', cat)).forEach(c => {
       const cp = repasseDe(c), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
       total += entra;
       linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
@@ -7952,7 +8051,7 @@ function detalheDRE(chave){
     });
 
   } else if (tipo === 'receita' || tipo === 'tarifas'){
-    const casaCat = c => tipo === 'tarifas' ? grupoDaCat(c) === grupo : c === cat;
+    const casaCat = c => tipo === 'tarifas' ? grupoDaCat(c) === grupo : soA(c, cat);
     const valorP = p => tipo === 'tarifas' ? n(p.TARIFA) : rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA));
     titulo = tipo === 'tarifas' ? 'Tarifas bancárias' : 'Receita — ' + cat;
     cols = ['Crédito','Pasta / cliente','Descrição','Valor do crédito','Entrou nesta linha'];
@@ -7972,7 +8071,7 @@ function detalheDRE(chave){
   } else {
     const contas = (DB.CONTAS_PAGAR||[])
       .filter(c => c.CATEGORIA !== 'Repasse a cliente' && noMes(c.VENCIMENTO))
-      .filter(c => (c.CATEGORIA || 'Outras despesas') === cat)
+      .filter(c => soA(c.CATEGORIA || 'Outras despesas', cat))
       .sort((a,b) => String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO)));
     titulo = 'Despesas — ' + cat;
     cols = ['Vencimento','Descrição','Favorecido','Categoria','Situação','Valor'];
@@ -7982,7 +8081,7 @@ function detalheDRE(chave){
               + (c.DATA_PGTO ? ' ' + dataBR(c.DATA_PGTO) : '')+'</span>', nMoeda(c.VALOR)]; });
   }
 
-  modal(titulo + ' — ' + (mes ? mesBR(mes) : 'todo o período'),
+  modal(titulo + ' — ' + rotuloPer,
     tabelaDetalhe(cols, linhas, total),
     '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
 }
