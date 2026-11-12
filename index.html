@@ -178,7 +178,8 @@ table.det{width:100%}
 table.det td{white-space:normal;overflow-wrap:break-word}
 table.det td:first-child,table.det td.num,table.det th.num{white-space:nowrap}
 table.det td .tag{white-space:normal}
-@media(min-width:620px){table.det td:nth-child(2),table.det td:nth-child(3){min-width:130px}}
+@media(min-width:620px){table.det td:nth-child(2),table.det td:nth-child(3){min-width:130px}
+  table.det td .tag{white-space:nowrap}}
 @media(max-width:619px){table.det th,table.det td{padding:3px 5px;font-size:11.5px}}
 table.densa td b{font-weight:600}
 table.densa .tag{padding:1px 6px;font-size:10.5px}
@@ -363,7 +364,7 @@ table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v14.4';
+const VERSAO_APP = 'v14.7';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -987,7 +988,8 @@ const ACOES_ALTERAM = ['gravarAcesso','gravarCP','gravarCR','gravarComissionado'
   'desconciliarLoteTodo','voltarPendente',
   'marcarExecucao','marcarGuia','marcarHomologacao','alternarSemDados','gravarObsMov',
   'confirmarImport','confirmarImportAcordos','confirmarImportCP',
-  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','aplicarSoEscritorio','aplicarMoverCategoria','gerarRec',
+  'aplicarComissoes','aplicarDiaUtil','aplicarRateio','aplicarSoEscritorio','aplicarMoverCategoria',
+  'aplicarMassaDetalhe','gerarRec',
   'addFavorecidoRapido','addSubcat','addSubclasse','removerAnexo','lancarTarifa',
   'formCP','formCR','formLanc','formNovoNaConciliacao','formObsMov','formRecebida','formAcesso',
   'formComissionado','formConta','formFavorecido','formPraca','formRegra','formSubcat',
@@ -1025,6 +1027,27 @@ function travarCliquesConsulta(){
     bloqueiaConsulta();
   }, true);
 }
+/* ── Só o master cria categoria ──
+   Categoria ou subcategoria criada por engano — "Gestor", "Recepcionista",
+   duas grafias da mesma coisa — espalha lançamento por toda parte e depois dá
+   trabalho juntar de volta. Criar fica com o usuário master (o de perfil
+   ADMIN, o mesmo da senha master); o resto do sistema continua aberto. */
+function ehMaster(){
+  const m = usuarioMaster();
+  const login = String((USER && USER.LOGIN) || '').trim().toLowerCase();
+  if (m && login) return String(m.LOGIN || '').trim().toLowerCase() === login;
+  // sem a lista de usuários à mão, vale o perfil
+  return String((USER && USER.PERFIL) || '').toUpperCase() === 'ADMIN';
+}
+function bloqueiaNaoMaster(oque){
+  if (ehMaster()) return false;
+  toast('Só o usuário master pode criar ' + (oque || 'categorias') + '.', 'erro');
+  return true;
+}
+const avisoSoMaster = oque => '<p class="mini" style="margin-bottom:12px">Só o usuário master cria '
+  + oque + ' — assim a lista não se multiplica com grafias diferentes da mesma coisa. '
+  + 'Você pode editar e usar as que já existem.</p>';
+
 /* A conferência com a nuvem saiu de dentro das configurações e ganhou botão
    próprio no topo: dá para liberar só ela para quem cuida do financeiro, sem
    abrir o resto. Quem já tem configurações continua tendo, sem precisar marcar
@@ -1489,7 +1512,7 @@ function cfgSubcats(){
     + '<button class="btn sm sec" onclick="formSubcat(\''+s.ID+'\')">Editar</button> '
     + '<button class="btn sm per" onclick="apagarReg(\'SUBCATEGORIAS\',\''+s.ID+'\',\''+esc(s.NOME)+'\',\'subcats\')">Excluir</button></td></tr>').join('')
     : '<tr><td colspan="3" class="vazio">Nenhuma subcategoria. Elas aparecem para escolher assim que a categoria correspondente for selecionada num lançamento.</td></tr>';
-  return (cats.length
+  return (!ehMaster() ? avisoSoMaster('subcategorias') : cats.length
     ? '<div class="grade" style="margin-bottom:12px;align-items:end">'
       + sel('novaSubcatCat','Categoria', cats.map(c => [c,c]), FILTROS.ultCatSubcat || '')
       + '<div class="campo" style="flex:1;min-width:180px"><label for="novaSubcatNome">Nova subcategoria</label>'
@@ -1499,6 +1522,7 @@ function cfgSubcats(){
     + tabelaSimples([{t:'Categoria'},{t:'Subcategoria'},{t:''}], linhas);
 }
 async function addSubcat(){
+  if (bloqueiaNaoMaster('subcategorias')) return;
   const cat = val('novaSubcatCat'), nome = tit(val('novaSubcatNome'));
   if (!cat || !nome) return toast('Escolha a categoria e informe o nome da subcategoria.','erro');
   if ((DB.SUBCATEGORIAS||[]).some(s => s.CATEGORIA === cat && s.NOME.toLowerCase() === nome.toLowerCase()))
@@ -1775,6 +1799,10 @@ const ehCatConta2 = nome => ehCatAplicacao(nome) || ehCatResgate(nome);
 const somaCats = (mapa, teste) => rd(Object.keys(mapa||{})
   .filter(teste).reduce((s,k) => s + n(mapa[k]), 0));
 
+/* a chave das linhas de subcategoria quando o lançamento não tem uma */
+const SEM_SUB = '— sem subcategoria —';
+/* a subcategoria de um registro, já na forma usada nas linhas */
+const chaveSub = x => String(x == null ? '' : x).trim() || SEM_SUB;
 const grupoDaCat = nome => {
   const c = (DB.SUBCLASSES||[]).find(x => x.NOME === nome);
   const g = c && String(c.GRUPO||'').trim();
@@ -1818,15 +1846,18 @@ function cfgSubclasses(){
     + '<button class="btn sm sec" onclick="formSubclasse(\''+s.ID+'\')">Editar</button> '
     + '<button class="btn sm per" onclick="apagarReg(\'SUBCLASSES\',\''+s.ID+'\',\''+esc(s.NOME)+'\',\'subclasses\')">Excluir</button></td></tr>').join('')
     : '<tr><td colspan="3" class="vazio">Nenhuma categoria cadastrada.</td></tr>';
-  return '<div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end;flex-wrap:wrap">'
-    + '<div class="campo" style="flex:1;min-width:180px;margin:0"><label>Nova categoria</label><input id="novaSub" placeholder="Ex.: Acordo trabalhista"></div>'
-    + '<div class="campo" style="margin:0"><label>Tipo</label><select id="novaSubTipo"><option value="Crédito">Crédito</option><option value="Débito">Débito</option></select></div>'
-    + '<button class="btn" onclick="addSubclasse()">Adicionar</button></div>'
+  return (ehMaster()
+    ? '<div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end;flex-wrap:wrap">'
+      + '<div class="campo" style="flex:1;min-width:180px;margin:0"><label>Nova categoria</label><input id="novaSub" placeholder="Ex.: Acordo trabalhista"></div>'
+      + '<div class="campo" style="margin:0"><label>Tipo</label><select id="novaSubTipo"><option value="Crédito">Crédito</option><option value="Débito">Débito</option></select></div>'
+      + '<button class="btn" onclick="addSubclasse()">Adicionar</button></div>'
+    : avisoSoMaster('categorias'))
     + '<p class="mini" style="margin-bottom:12px">As de <b>crédito</b> aparecem nos lançamentos, nos recebimentos e nas regras de comissão. '
     + 'As de <b>débito</b> aparecem ao lançar uma conta a pagar. Marque em Editar as que <b>dividem com o cliente</b>.</p>'
     + tabelaSimples([{t:'Categoria'},{t:'Tipo'},{t:''}], linhas);
 }
 async function addSubclasse(){
+  if (bloqueiaNaoMaster('categorias')) return;
   const nome = tit(val('novaSub')); if (!nome) return toast('Informe o nome da categoria.','erro');
   if ((DB.SUBCLASSES||[]).some(c => c.NOME.toLowerCase() === nome.toLowerCase()))
     return toast('Já existe uma categoria com esse nome.','erro');
@@ -5627,6 +5658,12 @@ function previaImportCP(linhas){
     '<div class="kpis" style="margin:14px 0 10px">'
     + '<div class="kpi d"><div class="rot">Contas a importar</div><div class="val">'+IMPCP.length+'</div></div>'
     + '<div class="kpi p"><div class="rot">Soma</div><div class="val" style="font-size:17px">'+moeda(total)+'</div></div></div>'
+    + (IMPCP_NOVAS.cats.length && !ehMaster()
+        ? '<div class="erro">A planilha traz ' + IMPCP_NOVAS.cats.length + ' categoria(s) que não existem '
+          + 'no sistema (' + esc(IMPCP_NOVAS.cats.join(', ')) + '). Só o usuário master cria categoria, '
+          + 'então a importação fica parada: corrija o nome na planilha para uma categoria já cadastrada, '
+          + 'ou peça ao master para criá-la.</div>'
+        : '')
     + (IMPCP_NOVAS.cats.length || IMPCP_NOVAS.favs.length
         ? '<p class="mini">Serão criados junto: '
           + (IMPCP_NOVAS.cats.length ? '<b>'+IMPCP_NOVAS.cats.length+'</b> categoria(s) de débito ('+esc(IMPCP_NOVAS.cats.join(', '))+')' : '')
@@ -5646,6 +5683,8 @@ function previaImportCP(linhas){
 }
 async function confirmarImportCP(){
   if (!IMPCP.length) return;
+  // importar criando categoria nova é a porta dos fundos do cadastro
+  if (IMPCP_NOVAS.cats.length && bloqueiaNaoMaster('categorias')) return;
   carregandoOn('Importando '+IMPCP.length+' contas…');
   try{
     const lote = [];
@@ -7357,7 +7396,7 @@ function dadosDRE(mes, grupo){
   const soma = (obj, k, v) => { if (!v) return; obj[k] = rd((obj[k] || 0) + v); };
   const somaSub = (obj, cat, sub, v) => {
     if (!v) return;
-    const s2 = String(sub == null ? '' : sub).trim() || '— sem subcategoria —';
+    const s2 = chaveSub(sub);
     obj[cat] = obj[cat] || {};
     obj[cat][s2] = rd((obj[cat][s2] || 0) + v);
   };
@@ -7737,9 +7776,10 @@ function dreResultado(mes, grupo, comSub){
   /* O detalhe leva o grupo da tela: na aba Particular um clique não pode trazer
      conta do escritório, e vice-versa. Sem isso, a linha de tarifas abria todas
      as receitas do escritório mesmo clicada no DRE particular. */
-  const li = (rot, v, cls, drill) => {
+  const li = (rot, v, cls, drill, sub) => {
     const arg = drill ? '\'' + esc(drill).replace(/'/g,"\\'") + '\',\''
-                        + esc(grupo).replace(/'/g,"\\'") + '\'' : '';
+                        + esc(grupo).replace(/'/g,"\\'") + '\''
+                        + (sub ? ',\'\',\'\',\'' + esc(sub).replace(/'/g,"\\'") + '\'' : '') : '';
     const abre = drill ? ' class="abrir" onclick="detalheDRE('+arg+')"' : '';
     return '<tr class="'+(cls||'')+'"'+(drill?' style="cursor:pointer"':'')
       + '><td'+abre+'>'+esc(rot)+(drill?' <span class="lupa">›</span>':'')+'</td>'
@@ -7758,10 +7798,10 @@ function dreResultado(mes, grupo, comSub){
     const m2 = (mapa||{})[cat] || {};
     const chaves = Object.keys(m2);
     if (!chaves.length) return '';
-    if (chaves.length === 1 && chaves[0] === '— sem subcategoria —') return '';
+    if (chaves.length === 1 && chaves[0] === SEM_SUB) return '';
     return chaves
       .sort((a2,b2) => Math.abs(n(m2[b2])) - Math.abs(n(m2[a2])) || String(a2).localeCompare(String(b2),'pt-BR'))
-      .map(k => li(k, sinal * n(m2[k]), 'recuo2', drill)).join('');
+      .map(k => li(k, sinal * n(m2[k]), 'recuo2', drill, k)).join('');
   };
   const catsRec = linhasCategoria(categoriasDoGrupo('C', grupo), d.receitas);
   const catsDesp = linhasCategoria(categoriasDoGrupo('D', grupo).filter(c => c !== 'Repasse a cliente'), d.despesas);
@@ -7876,20 +7916,22 @@ function dreComparativo(grupo, comSub){
   /* O valor de um mês abre as contas daquele mês; o NOME da categoria abre o
      período inteiro que está na tela, que é o que se quer ao olhar a evolução
      e achar o mês fora da curva. */
-  const linha = (rot, vals, cls, drill) => {
+  const linha = (rot, vals, cls, drill, sub) => {
+    // a linha de subcategoria abre só ela, não a categoria inteira
+    const fim2 = sub ? ',\'' + esc(sub).replace(/'/g,"\\'") + '\'' : '';
     const cel = (v,i) => '<td class="num'+(v<0?' neg':'')+(drill?' abrir':'')+'"'
-      + (drill ? ' style="cursor:pointer" onclick="verMesDRE(\''+meses[i]+'\','+arg(drill)+')"' : '')
+      + (drill ? ' style="cursor:pointer" onclick="verMesDRE(\''+meses[i]+'\','+arg(drill)+fim2+')"' : '')
       + '>'+nMoeda(v)+'</td>';
     const nome = drill
       ? '<td class="abrir" style="cursor:pointer" onclick="detalheDRE('+arg(drill)+',\''
-        + meses[0] + '\',\'' + meses[meses.length-1] + '\')">'
+        + meses[0] + '\',\'' + meses[meses.length-1] + '\''+fim2+')">'
         + esc(rot) + ' <span class="lupa">›</span></td>'
       : '<td>'+esc(rot)+'</td>';
     const tot = soma12(vals);
     return '<tr class="'+(cls||'')+'">'+nome + vals.map(cel).join('')
       + '<td class="num tot'+(tot<0?' neg':'')+(drill?' abrir':'')+'"'
       + (drill ? ' style="cursor:pointer" onclick="detalheDRE('+arg(drill)+',\''
-          + meses[0] + '\',\'' + meses[meses.length-1] + '\')"' : '')
+          + meses[0] + '\',\'' + meses[meses.length-1] + '\''+fim2+')"' : '')
       + '>'+nMoeda(tot)+'</td></tr>';
   };
   /* As subcategorias por mês, logo abaixo da categoria (hoje só a aba
@@ -7900,9 +7942,9 @@ function dreComparativo(grupo, comSub){
     const porMes = dados.map(d => (d[campo] || {})[cat] || {});
     const chaves = [...new Set(porMes.reduce((l,m) => l.concat(Object.keys(m)), []))];
     if (!chaves.length) return '';
-    if (chaves.length === 1 && chaves[0] === '— sem subcategoria —') return '';
+    if (chaves.length === 1 && chaves[0] === SEM_SUB) return '';
     return chaves.sort((a2,b2) => String(a2).localeCompare(String(b2),'pt-BR'))
-      .map(k => linha(k, porMes.map(m => sinal * n(m[k])), 'recuo2', drill)).join('');
+      .map(k => linha(k, porMes.map(m => sinal * n(m[k])), 'recuo2', drill, k)).join('');
   };
 
   return '<div class="filtros">'
@@ -7955,9 +7997,9 @@ function dreComparativo(grupo, comSub){
         + 'não entram na receita, na despesa nem no resultado acima — o dinheiro só mudou de conta.' : '')
     + '</p>';
 }
-function verMesDRE(mes, chave, grupo){
+function verMesDRE(mes, chave, grupo, sub){
   FILTROS.fMesD = mes;
-  detalheDRE(chave, grupo);
+  detalheDRE(chave, grupo, '', '', sub);
 }
 
 function dreAgendado(mes, grupo){
@@ -8048,7 +8090,7 @@ const botaoEditar = (tipo, id) => soLeitura() ? []
 
 /* mesIni/mesFim abrem o período inteiro do comparativo; sem eles, o mês do
    filtro, como antes. */
-function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
+function detalheDRE(chave, grupoDaTela, mesIni, mesFim, sub){
   const periodo = !!(mesIni && mesFim);
   const mes = periodo ? '' : (FILTROS.fMesD || mesDe(hoje()));
   const rotuloPer = periodo
@@ -8065,10 +8107,17 @@ function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
   };
   const partes = String(chave).split('|');
   const tipo = partes[0], cat = partes.slice(1).join('|');
+  /* Clicou numa linha de subcategoria: a janela mostra só ela, não a categoria
+     inteira. A subcategoria de uma parcela é a do lançamento, igual ao que o
+     DRE soma. */
+  const casaSub = x => !sub || chaveSub(x) === sub;
+  const subDaParcela = p => chaveSub(lancDe(p.LANC_ID).SUBCATEGORIA);
   const catParcela = p => p.TIPO === 'Sucumbência' ? 'Sucumbência' : (lancDe(p.LANC_ID).SUBCLASSE || '—');
   const recb = (DB.PARCELAS||[]).filter(p => p.STATUS === 'Recebida' && noMes(p.DATA_CREDITO));
   const crRec = (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido' && noMes(c.DATA_RECEB));
-  let titulo = '', cols = [], linhas = [], total = 0;
+  let titulo = '', cols = [];
+  const itens = [];
+  const juntar = (t, id, valor, cels) => itens.push({tipo:t, id, valor:rd(valor), cels});
 
   // O repasse tem tela própria: mostra TODAS as parcelas da categoria no mês e a
   // situação do repasse de cada uma, inclusive as que não entraram na conta.
@@ -8076,23 +8125,24 @@ function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
   if (tipo === 'repasse'){
     titulo = 'Repasses — ' + cat;
     cols = ['Crédito','Pasta / cliente','Descrição',{t:'Valor do crédito',num:1},
-            'Repasse no sistema',{t:'Entrou nesta linha',num:1}].concat(colunaEditar());
+            'Repasse no sistema',{t:'Entrou nesta linha',num:1}];
     const sit = cp => { const m = repasseNaoDevido(cp);
       return m ? '<span class="tag t-pend">'+esc(m)+'</span>'
                : '<span class="tag t-ok">em aberto</span>'
                  + (cp.VENCIMENTO ? ' <span class="mini">venc '+dataBR(cp.VENCIMENTO)+'</span>' : ''); };
-    recb.filter(p => soA(catParcela(p), cat)).forEach(p => {
+    recb.filter(p => soA(catParcela(p), cat) && casaSub(subDaParcela(p))).forEach(p => {
       const cp = repasseDe(p), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
-      total += entra; const l = lancDe(p.LANC_ID);
-      linhas.push([dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
-                   esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
-                   sit(cp), entra ? nMoeda(entra) : '—'].concat(botaoEditar('parcela', p.ID)));
+      const l = lancDe(p.LANC_ID);
+      juntar('parcela', p.ID, entra,
+        [dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
+         esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
+         sit(cp), entra ? nMoeda(entra) : '—']);
     });
-    crRec.filter(c => soA(c.CATEGORIA || '—', cat)).forEach(c => {
+    crRec.filter(c => soA(c.CATEGORIA || '—', cat) && casaSub(c.SUBCATEGORIA)).forEach(c => {
       const cp = repasseDe(c), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
-      total += entra;
-      linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
-                   nMoeda(c.VALOR), sit(cp), entra ? nMoeda(entra) : '—'].concat(botaoEditar('receber', c.ID)));
+      juntar('receber', c.ID, entra,
+        [dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
+         nMoeda(c.VALOR), sit(cp), entra ? nMoeda(entra) : '—']);
     });
 
   } else if (tipo === 'receita' || tipo === 'tarifas'){
@@ -8100,41 +8150,194 @@ function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
     const valorP = p => tipo === 'tarifas' ? n(p.TARIFA) : rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA));
     titulo = tipo === 'tarifas' ? 'Tarifas bancárias' : 'Receita — ' + cat;
     cols = ['Crédito','Pasta / cliente','Descrição',{t:'Valor do crédito',num:1},
-            {t:'Entrou nesta linha',num:1}].concat(colunaEditar());
-    recb.filter(p => casaCat(catParcela(p))).forEach(p => {
-      const v = valorP(p); if (!v) return; total += v; const l = lancDe(p.LANC_ID);
-      linhas.push([dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
-                   esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
-                   nMoeda(v)].concat(botaoEditar('parcela', p.ID)));
+            {t:'Entrou nesta linha',num:1}];
+    recb.filter(p => casaCat(catParcela(p)) && casaSub(subDaParcela(p))).forEach(p => {
+      const v = valorP(p); if (!v) return; const l = lancDe(p.LANC_ID);
+      juntar('parcela', p.ID, v,
+        [dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
+         esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR), nMoeda(v)]);
     });
-    crRec.filter(c => casaCat(c.CATEGORIA || '—')).forEach(c => {
+    crRec.filter(c => casaCat(c.CATEGORIA || '—') && casaSub(c.SUBCATEGORIA)).forEach(c => {
       const v = tipo === 'tarifas' ? n(c.TARIFA)
               : rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA));
-      if (!v) return; total += v;
-      linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
-                   nMoeda(c.VALOR), nMoeda(v)].concat(botaoEditar('receber', c.ID)));
+      if (!v) return;
+      juntar('receber', c.ID, v,
+        [dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
+         nMoeda(c.VALOR), nMoeda(v)]);
     });
 
   } else {
     const contas = (DB.CONTAS_PAGAR||[])
       .filter(c => c.CATEGORIA !== 'Repasse a cliente' && noMes(c.VENCIMENTO))
-      .filter(c => soA(c.CATEGORIA || 'Outras despesas', cat))
+      .filter(c => soA(c.CATEGORIA || 'Outras despesas', cat) && casaSub(c.SUBCATEGORIA))
       .sort((a,b) => String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO)));
     titulo = 'Despesas — ' + cat;
     // a coluna Categoria saiu: é a mesma em toda a lista e está no título da
     // janela; sem ela a descrição e o favorecido ficam lado a lado sem rolagem
-    cols = ['Vencimento','Descrição','Favorecido','Situação',{t:'Valor',num:1}].concat(colunaEditar());
-    linhas = contas.map(c => { total += n(c.VALOR);
-      return [dataBR(c.VENCIMENTO), esc(c.DESCRICAO||'—'), esc(c.FAVORECIDO||'—'),
-              '<span class="tag '+(c.STATUS==='Pago'?'t-ok':'t-pend')+'">'+esc(c.STATUS)
-              + (c.DATA_PGTO ? ' ' + dataBR(c.DATA_PGTO) : '')+'</span>',
-              nMoeda(c.VALOR)].concat(botaoEditar('pagar', c.ID)); });
+    cols = ['Vencimento','Descrição','Favorecido','Situação',{t:'Valor',num:1}];
+    contas.forEach(c => juntar('pagar', c.ID, n(c.VALOR),
+      [dataBR(c.VENCIMENTO), esc(c.DESCRICAO||'—'), esc(c.FAVORECIDO||'—'),
+       '<span class="tag '+(c.STATUS==='Pago'?'t-ok':'t-pend')+'">'+esc(c.STATUS)
+       + (c.DATA_PGTO ? ' ' + dataBR(c.DATA_PGTO) : '')+'</span>', nMoeda(c.VALOR)]));
   }
 
-  modal(titulo + ' — ' + rotuloPer,
-    tabelaDetalhe(cols, linhas, total),
-    '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
+  // o texto de cada linha é o que a busca procura: data, descrição, favorecido,
+  // cliente e valor, do jeito que aparecem na tela
+  itens.forEach(i => { i.texto = semAcento(i.cels.join(' ').replace(/<[^>]*>/g,' ')); });
+  DET = {titulo:titulo + (sub ? ' · ' + sub : '') + ' — ' + rotuloPer,
+         cols, itens, tipo, cat, sub:sub||'', grupo,
+         busca:'', vMin:'', vMax:'', sel:{}};
+  pintarDetalhe();
 }
+
+/* ── A janela do detalhe: busca, seleção e edição em massa ──
+   O mesmo quadro que abre ao clicar numa linha do DRE. Guardado em DET para
+   poder repintar a cada tecla da busca e a cada marcação, sem refazer a
+   apuração. */
+let DET = null;
+const chaveDet = i => i.tipo + ':' + i.id;
+/* parcela de acordo não entra na edição em massa: a categoria dela é a do
+   lançamento, e mudar ali mudaria o acordo inteiro */
+const massaDet = i => i.tipo === 'pagar' || i.tipo === 'receber';
+function itensDetalhe(){
+  if (!DET) return [];
+  const t = semAcento(DET.busca), mi = DET.vMin === '' ? null : n(DET.vMin),
+        ma = DET.vMax === '' ? null : n(DET.vMax);
+  return DET.itens.filter(i =>
+    (!t || i.texto.indexOf(t) > -1)
+    && (mi === null || Math.abs(i.valor) >= mi)
+    && (ma === null || Math.abs(i.valor) <= ma));
+}
+const selecionadosDet = () => itensDetalhe().filter(i => DET.sel[chaveDet(i)] && massaDet(i));
+function filtrarDetalhe(idFoco){
+  if (!DET) return;
+  DET.busca = val('detBusca'); DET.vMin = val('detMin'); DET.vMax = val('detMax');
+  clearTimeout(window._det);
+  window._det = setTimeout(() => {
+    pintarDetalhe();
+    const e = document.getElementById(idFoco);
+    if (e){ e.focus(); if (e.setSelectionRange && e.type !== 'number') e.setSelectionRange(e.value.length, e.value.length); }
+  }, 300);
+}
+function limparFiltroDetalhe(){
+  if (!DET) return;
+  DET.busca = ''; DET.vMin = ''; DET.vMax = ''; pintarDetalhe();
+}
+function marcarDetalhe(chave, marcado){
+  if (!DET) return;
+  if (marcado) DET.sel[chave] = 1; else delete DET.sel[chave];
+  pintarDetalhe();
+}
+function marcarTodosDetalhe(marcado){
+  if (!DET) return;
+  itensDetalhe().filter(massaDet).forEach(i => {
+    if (marcado) DET.sel[chaveDet(i)] = 1; else delete DET.sel[chaveDet(i)];
+  });
+  pintarDetalhe();
+}
+function pintarDetalhe(){
+  if (!DET) return;
+  const vis = itensDetalhe();
+  const total = rd(vis.reduce((s,i) => s + i.valor, 0));
+  const podeMassa = !soLeitura() && DET.itens.some(massaDet);
+  const marcados = selecionadosDet();
+  const todos = vis.filter(massaDet);
+  const colSel = podeMassa
+    ? [{t:'<input type="checkbox" onchange="marcarTodosDetalhe(this.checked)"'
+        + (todos.length && marcados.length === todos.length ? ' checked' : '') + '>', bruto:1}]
+    : [];
+  const cols = colSel.concat(DET.cols).concat(colunaEditar());
+  const linhas = vis.map(i => {
+    const sel = podeMassa
+      ? ['<input type="checkbox"' + (massaDet(i) ? '' : ' disabled title="Parcela de acordo: edite pelo lançamento"')
+         + (DET.sel[chaveDet(i)] ? ' checked' : '')
+         + ' onchange="marcarDetalhe(\''+esc(chaveDet(i))+'\', this.checked)">']
+      : [];
+    return sel.concat(i.cels).concat(botaoEditar(i.tipo, i.id));
+  });
+  const filtros = '<div class="filtros">'
+    + '<div class="campo busca"><label for="detBusca">Buscar</label>'
+      + '<input id="detBusca" value="'+esc(DET.busca)+'" placeholder="Descrição, favorecido, cliente…" '
+      + 'oninput="filtrarDetalhe(\'detBusca\')"></div>'
+    + '<div class="campo"><label for="detMin">Valor de</label>'
+      + '<input id="detMin" type="number" step="0.01" value="'+esc(DET.vMin)+'" oninput="filtrarDetalhe(\'detMin\')"></div>'
+    + '<div class="campo"><label for="detMax">até</label>'
+      + '<input id="detMax" type="number" step="0.01" value="'+esc(DET.vMax)+'" oninput="filtrarDetalhe(\'detMax\')"></div>'
+    + '<div class="campo limpar"><label>&nbsp;</label>'
+      + '<button class="btn sec" onclick="limparFiltroDetalhe()">Limpar</button></div>'
+    + '</div>'
+    + (vis.length === DET.itens.length ? ''
+       : '<p class="mini" style="margin:-6px 0 10px">Mostrando '+vis.length+' de '+DET.itens.length
+         + ' lançamento(s) — o total abaixo é o do que está filtrado.</p>');
+  modal(DET.titulo, filtros + tabelaDetalhe(cols, linhas, total),
+    '<button class="btn sec" onclick="fecharModal()">Fechar</button>'
+    + (marcados.length
+       ? '<button class="btn" onclick="formMassaDetalhe()">Editar '+marcados.length+' selecionado(s)</button>'
+       : ''), 'larga');
+}
+/* Passar vários lançamentos de uma vez para outra categoria ou subcategoria */
+function formMassaDetalhe(){
+  if (bloqueiaConsulta()) return;
+  const marcados = selecionadosDet();
+  if (!marcados.length) return toast('Marque ao menos um lançamento.','erro');
+  const soPagar = marcados.every(i => i.tipo === 'pagar');
+  const cats = categorias(soPagar ? 'D' : 'C');
+  const subs = [...new Set((DB.SUBCATEGORIAS||[]).filter(x => String(x.ATIVO||'SIM').toUpperCase() !== 'NAO')
+    .map(x => x.NOME))].sort((a,b) => String(a).localeCompare(String(b),'pt-BR'));
+  modal('Editar ' + marcados.length + ' lançamento(s)',
+    '<p class="mini" style="margin:0 0 12px">Vale para os ' + marcados.length + ' marcados. '
+    + 'O que ficar em <b>— manter —</b> não é alterado; os valores e as datas não mudam.</p>'
+    + '<div class="grade">'
+    + sel('mdCat','Categoria', [['','— manter —']].concat(cats.map(c => [c,c])), '')
+    /* quem não é master escolhe entre as que existem: digitar um nome novo aqui
+       seria criar subcategoria pela porta dos fundos */
+    + (ehMaster()
+       ? '<div class="campo"><label for="mdSub">Subcategoria</label>'
+         + '<input id="mdSub" list="mdSubs" placeholder="— manter —">'
+         + '<datalist id="mdSubs">' + subs.map(x => '<option value="'+esc(x)+'">').join('') + '</datalist></div>'
+       : sel('mdSub','Subcategoria', [['','— manter —']].concat(subs.map(x => [x,x])), ''))
+    + '</div>'
+    + '<div class="check"><input type="checkbox" id="mdLimpaSub">'
+      + '<label for="mdLimpaSub">Deixar sem subcategoria</label></div>',
+    '<button class="btn sec" onclick="pintarDetalhe()">Cancelar</button>'
+    + '<button class="btn" onclick="aplicarMassaDetalhe()">Aplicar aos ' + marcados.length + '</button>',
+    'estreita');
+}
+async function aplicarMassaDetalhe(){
+  if (bloqueiaConsulta()) return;
+  const marcados = selecionadosDet();
+  if (!marcados.length) return toast('Marque ao menos um lançamento.','erro');
+  const cat = val('mdCat'), limpaSub = val('mdLimpaSub');
+  const subNova = limpaSub ? '' : tit(val('mdSub'));
+  if (!cat && !subNova && !limpaSub) return toast('Escolha a categoria ou a subcategoria.','erro');
+  const jaExiste = (DB.SUBCATEGORIAS||[]).some(x => chaveCat(x.NOME) === chaveCat(subNova));
+  if (subNova && !jaExiste && bloqueiaNaoMaster('subcategorias')) return;
+  const lote = [];
+  marcados.forEach(i => {
+    const aba = i.tipo === 'pagar' ? 'CONTAS_PAGAR' : 'CONTAS_RECEBER';
+    const r = (DB[aba]||[]).find(x => x.ID === i.id); if (!r) return;
+    const novo = Object.assign({}, r);
+    if (cat) novo.CATEGORIA = cat;
+    if (limpaSub) novo.SUBCATEGORIA = ''; else if (subNova) novo.SUBCATEGORIA = subNova;
+    lote.push({aba, registro:novo});
+  });
+  if (!lote.length) return toast('Nada para alterar.','erro');
+  // aplica aqui primeiro: a janela e o DRE respondem na hora
+  lote.forEach(it => {
+    const L = DB[it.aba] || (DB[it.aba] = []);
+    const j = L.findIndex(x => x.ID === it.registro.ID);
+    if (j >= 0) L[j] = it.registro;
+  });
+  invalidarIdx();
+  toast(lote.length + ' lançamento(s) alterado(s)'
+    + (cat ? ' para "' + cat + '"' : '')
+    + (limpaSub ? ' · sem subcategoria' : (subNova ? ' · subcategoria "' + subNova + '"' : '')) + '.', 'ok');
+  fecharModal();
+  render();
+  try{ await salvarLote(lote); }
+  catch(e){ toast(e.message,'erro'); await carregar(); }
+}
+
 /* Uma coluna pode vir como {t:'Valor', num:1}: as de dinheiro ficam estreitas e
    alinhadas à direita, e as de texto podem quebrar linha — assim a janela cabe
    na tela em vez de pedir rolagem para o lado. */
@@ -8148,7 +8351,8 @@ function tabelaDetalhe(cols, linhas, total){
   // coluna dos botões) fica em branco no rodapé
   const iTot = cols.reduce((acc,c,i) => (c && c.num) ? i : acc, ultima);
   return '<div class="tw"><table class="densa det"><thead><tr>'
-    + cols.map((c,i) => '<th'+(ehNum(c,i)?' class="num"':'')+'>'+esc(titulo2(c))+'</th>').join('')
+    + cols.map((c,i) => '<th'+(ehNum(c,i)?' class="num"':'')+'>'
+        + ((c && c.bruto) ? titulo2(c) : esc(titulo2(c))) + '</th>').join('')
     + '</tr></thead><tbody>'
     + linhas.map(l => '<tr>' + l.map((v,i) => '<td'+(ehNum(cols[i],i)?' class="num"':'')+'>'+v+'</td>').join('') + '</tr>').join('')
     + '</tbody><tfoot><tr><th colspan="'+iTot+'" style="text-align:right">Total — '+linhas.length+' lançamento(s)</th>'
