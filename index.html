@@ -170,6 +170,16 @@ tr.sel:hover{background:var(--brand-l)}
 table.densa th{padding:5px 8px}
 table.densa td{padding:3px 8px;font-size:12.5px;line-height:1.3;white-space:nowrap}
 table.densa td div.mini{display:inline;margin-left:6px}
+/* Janela de detalhe: a descrição quebra em duas linhas em vez de empurrar as
+   outras colunas para fora da tela. Datas e dinheiro seguem em uma linha só. */
+/* a coluna de total do período, destacada do mês a mês */
+table.dre th.tot,table.dre td.tot{border-left:1px solid var(--line);font-weight:600}
+table.det{width:100%}
+table.det td{white-space:normal;overflow-wrap:break-word}
+table.det td:first-child,table.det td.num,table.det th.num{white-space:nowrap}
+table.det td .tag{white-space:normal}
+@media(min-width:620px){table.det td:nth-child(2),table.det td:nth-child(3){min-width:130px}}
+@media(max-width:619px){table.det th,table.det td{padding:3px 5px;font-size:11.5px}}
 table.densa td b{font-weight:600}
 table.densa .tag{padding:1px 6px;font-size:10.5px}
 table.densa .btn.sm{padding:2px 8px;font-size:11px}
@@ -353,7 +363,7 @@ table.dre tr.recuo2 td{color:var(--ink3);font-size:12.5px}
    CONFIGURAÇÃO — cole aqui a URL /exec do seu Apps Script
    ══════════════════════════════════════════════════════════ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzNNoolgJTQ5fKDmQ9ieSdWoLQrdKpRZB_GrxGHqtFjAFagZYoZ5a7_cCzfuDnvk05h/exec';
-const VERSAO_APP = 'v14.1';
+const VERSAO_APP = 'v14.4';
 
 /* ── ESTADO ── */
 let DB = {}, USER = null, ABA = 'conciliacao', SUB = '', FILTROS = {};
@@ -7338,6 +7348,12 @@ function dadosDRE(mes, grupo){
   // o mesmo total aberto por subcategoria: subDesp['Despesa Dra. Karla']['Cartão']
   const subRec = {}, subDesp = {};
   let tarifas = 0;
+  /* A linha de tarifas existe porque, no recebimento de um cliente, a tarifa
+     sai da parte dele e entra na do escritório — por isso é "repassada ao
+     escritório" e vira linha própria da receita bruta. No DRE particular não
+     há cliente: a tarifa é só um custo do próprio recebimento, e fica dentro
+     da categoria em vez de abrir linha. A receita bruta dá no mesmo. */
+  const abreTarifa = grupo !== GRUPO_PARTICULAR;
   const soma = (obj, k, v) => { if (!v) return; obj[k] = rd((obj[k] || 0) + v); };
   const somaSub = (obj, cat, sub, v) => {
     if (!v) return;
@@ -7350,7 +7366,7 @@ function dadosDRE(mes, grupo){
     .filter(p => doGrupo(catParcela(p)))
     .forEach(p => {
       const sp = p.TIPO === 'Sucumbência' ? 0 : sucDaParcela(p, n(p.VALOR_CREDITADO) || n(p.VALOR));
-      const vp = rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA) - sp);
+      const vp = rd(n(p.VALOR_ESCRITORIO) - (abreTarifa ? n(p.TARIFA) : 0) - sp);
       soma(receitas, catParcela(p), vp);
       somaSub(subRec, catParcela(p), lancDe(p.LANC_ID).SUBCATEGORIA, vp);
       if (sp){ soma(receitas, 'Sucumbência', sp);     // a fatia de sucumbência vira linha própria
@@ -7359,21 +7375,21 @@ function dadosDRE(mes, grupo){
       const forP = repasseNaoDevido(rpP);
       if (!forP) soma(repasses, catParcela(p), n(rpP.VALOR));
       else if (rpP) soma(fora, forP, n(rpP.VALOR));
-      tarifas = rd(tarifas + n(p.TARIFA));
+      if (abreTarifa) tarifas = rd(tarifas + n(p.TARIFA));
     });
 
   (DB.CONTAS_RECEBER||[]).filter(c => c.STATUS === 'Recebido' && noMes(c.DATA_RECEB))
     .filter(c => doGrupo(c.CATEGORIA))
     .forEach(c => {
       const cat = c.CATEGORIA || '—';
-      const vc = rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA));
+      const vc = rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - (abreTarifa ? n(c.TARIFA) : 0));
       soma(receitas, cat, vc);
       somaSub(subRec, cat, c.SUBCATEGORIA, vc);
       const rpC = repasseDe(c);
       const forC = repasseNaoDevido(rpC);
       if (!forC) soma(repasses, cat, n(rpC.VALOR));
       else if (rpC) soma(fora, forC, n(rpC.VALOR));
-      tarifas = rd(tarifas + n(c.TARIFA));
+      if (abreTarifa) tarifas = rd(tarifas + n(c.TARIFA));
     });
 
   (DB.CONTAS_PAGAR||[]).filter(c => c.CATEGORIA !== 'Repasse a cliente' && noMes(c.VENCIMENTO))
@@ -7852,12 +7868,9 @@ function dreComparativo(grupo, comSub){
   const desp   = dados.map((d,i) => rd(d.totDesp - aplicado[i]));
   const result = dados.map((d,i) => rd(bruta[i] - desp[i]));
 
-  const varia = vals => {
-    const a = vals[vals.length-2], b = vals[vals.length-1];
-    if (!a) return b ? '<span class="pos">novo</span>' : '—';
-    const p = rd((b - a) / Math.abs(a) * 100);
-    return '<span class="'+(p>=0?'pos':'neg')+'">'+(p>0?'+':'')+nMoeda(p)+'%</span>';
-  };
+  // a última coluna é o total do período, não a variação do último mês: é o que
+  // se quer somar ao olhar uma categoria ao longo dos meses
+  const soma12 = vals => rd((vals||[]).reduce((t,v) => t + n(v), 0));
   const arg = d2 => '\'' + esc(d2).replace(/'/g,"\\'") + '\',\''
                      + esc(grupo).replace(/'/g,"\\'") + '\'';
   /* O valor de um mês abre as contas daquele mês; o NOME da categoria abre o
@@ -7872,8 +7885,12 @@ function dreComparativo(grupo, comSub){
         + meses[0] + '\',\'' + meses[meses.length-1] + '\')">'
         + esc(rot) + ' <span class="lupa">›</span></td>'
       : '<td>'+esc(rot)+'</td>';
+    const tot = soma12(vals);
     return '<tr class="'+(cls||'')+'">'+nome + vals.map(cel).join('')
-      + '<td class="num">'+varia(vals)+'</td></tr>';
+      + '<td class="num tot'+(tot<0?' neg':'')+(drill?' abrir':'')+'"'
+      + (drill ? ' style="cursor:pointer" onclick="detalheDRE('+arg(drill)+',\''
+          + meses[0] + '\',\'' + meses[meses.length-1] + '\')"' : '')
+      + '>'+nMoeda(tot)+'</td></tr>';
   };
   /* As subcategorias por mês, logo abaixo da categoria (hoje só a aba
      Particular pede). Só entram quando há mais de uma, ou uma que não seja a
@@ -7894,14 +7911,15 @@ function dreComparativo(grupo, comSub){
     + '<div class="card"><h3>' + esc(rotuloDRE(grupo)) + ' — evolução mês a mês</h3><div class="tw">'
     + '<table class="dre densa"><thead><tr><th></th>'
     + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
-    + '<th class="num">Variação</th></tr></thead><tbody>'
+    + '<th class="num tot">Total</th></tr></thead><tbody>'
     + linha('Receita bruta', bruta, 'nivel1')
     + catsRec.map(c => linha(c, dados.map(d => d.receitas[c] || 0), 'recuo', 'receita|'+c)
         + subLinhas('subRec', c, 1, 'receita|'+c)).join('')
     /* A tarifa é um conceito do recebimento de cliente — sai da parte do
        cliente e entra na do escritório. No DRE particular não existe, e a linha
        vinha zerada só atrapalhando. */
-    + (dados.some(d => n(d.tarifas)) ? linha('Tarifas bancárias', dados.map(d => d.tarifas), 'recuo', 'tarifas') : '')
+    + (grupo !== GRUPO_PARTICULAR && dados.some(d => n(d.tarifas))
+       ? linha('Tarifas bancárias', dados.map(d => d.tarifas), 'recuo', 'tarifas') : '')
     + linha('Despesas operacionais', desp.map(v => -v), 'nivel1')
     + catsDesp.map(c => linha(c, dados.map(d => -(d.despesas[c] || 0)), 'recuo', 'despesa|'+c)
         + subLinhas('subDesp', c, -1, 'despesa|'+c)).join('')
@@ -7911,7 +7929,7 @@ function dreComparativo(grupo, comSub){
       '<div class="card"><h3>Aplicações financeiras</h3><div class="tw">'
       + '<table class="dre densa"><thead><tr><th></th>'
       + meses.map(m => '<th class="num">'+mesBR(m)+'</th>').join('')
-      + '<th class="num">Variação</th></tr></thead><tbody>'
+      + '<th class="num tot">Total</th></tr></thead><tbody>'
       // uma linha por categoria, com o nome que ela tem no cadastro, para bater
       // com o que se vê em contas a pagar e a receber; o que cada uma
       // significa fica na nota abaixo
@@ -7930,9 +7948,9 @@ function dreComparativo(grupo, comSub){
       + 'resgatado: positivo é quanto ficou aplicado no mês, negativo é quanto voltou da aplicação para '
       + 'a conta do dia a dia.</p>'
       + '</div>')
-    + '<p class="mini">A coluna de variação compara o último mês com o anterior. '
-    + 'Clique no valor para ver as contas daquele mês, ou no nome da categoria para ver '
-    + 'todas as do período.'
+    + '<p class="mini">A última coluna é o total dos ' + meses.length + ' meses na tela. '
+    + 'Clique no valor de um mês para ver as contas dele, ou no nome da categoria — ou no total — '
+    + 'para ver todas as do período.'
     + (temConta2 ? ' Transferências entre contas próprias ficam no quadro de aplicações e '
         + 'não entram na receita, na despesa nem no resultado acima — o dinheiro só mudou de conta.' : '')
     + '</p>';
@@ -8002,6 +8020,32 @@ function graficoMeses(grupo){
 }
 
 /* ── Detalhe de uma linha do DRE ── */
+/* Da janela de detalhe do DRE direto para o lançamento. Reaproveita as mesmas
+   telas de edição do resto do sistema — a conta a receber já recebida abre a
+   tela do recebimento, que é onde o rateio pode ser corrigido. */
+function editarDoDRE(tipo, id){
+  if (bloqueiaConsulta()) return;
+  if (tipo === 'pagar'){
+    if (!(DB.CONTAS_PAGAR||[]).some(x => x.ID === id)) return toast('Conta não encontrada.','erro');
+    return formCP(id);
+  }
+  if (tipo === 'receber'){
+    const c = (DB.CONTAS_RECEBER||[]).find(x => x.ID === id);
+    if (!c) return toast('Conta não encontrada.','erro');
+    return c.STATUS === 'Recebido' ? formRecebida(id) : formCR(id);
+  }
+  if (tipo === 'parcela'){
+    const p = (DB.PARCELAS||[]).find(x => x.ID === id);
+    if (!p) return toast('Parcela não encontrada.','erro');
+    return verParcelas(p.LANC_ID);
+  }
+  toast('Registro de origem não encontrado.','erro');
+}
+/* sem botão para quem só consulta: ele não teria o que fazer com ele */
+const colunaEditar = () => soLeitura() ? [] : [{t:'', acao:1}];
+const botaoEditar = (tipo, id) => soLeitura() ? []
+  : ['<button class="btn sm sec" onclick="editarDoDRE(\''+tipo+'\',\''+esc(id)+'\')">Editar</button>'];
+
 /* mesIni/mesFim abrem o período inteiro do comparativo; sem eles, o mês do
    filtro, como antes. */
 function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
@@ -8031,7 +8075,8 @@ function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
   // Assim dá para auditar linha por linha de onde vem o total.
   if (tipo === 'repasse'){
     titulo = 'Repasses — ' + cat;
-    cols = ['Crédito','Pasta / cliente','Descrição','Valor do crédito','Repasse no sistema','Entrou nesta linha'];
+    cols = ['Crédito','Pasta / cliente','Descrição',{t:'Valor do crédito',num:1},
+            'Repasse no sistema',{t:'Entrou nesta linha',num:1}].concat(colunaEditar());
     const sit = cp => { const m = repasseNaoDevido(cp);
       return m ? '<span class="tag t-pend">'+esc(m)+'</span>'
                : '<span class="tag t-ok">em aberto</span>'
@@ -8041,31 +8086,33 @@ function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
       total += entra; const l = lancDe(p.LANC_ID);
       linhas.push([dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
                    esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
-                   sit(cp), entra ? nMoeda(entra) : '—']);
+                   sit(cp), entra ? nMoeda(entra) : '—'].concat(botaoEditar('parcela', p.ID)));
     });
     crRec.filter(c => soA(c.CATEGORIA || '—', cat)).forEach(c => {
       const cp = repasseDe(c), entra = repasseNaoDevido(cp) ? 0 : n(cp.VALOR);
       total += entra;
       linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
-                   nMoeda(c.VALOR), sit(cp), entra ? nMoeda(entra) : '—']);
+                   nMoeda(c.VALOR), sit(cp), entra ? nMoeda(entra) : '—'].concat(botaoEditar('receber', c.ID)));
     });
 
   } else if (tipo === 'receita' || tipo === 'tarifas'){
     const casaCat = c => tipo === 'tarifas' ? grupoDaCat(c) === grupo : soA(c, cat);
     const valorP = p => tipo === 'tarifas' ? n(p.TARIFA) : rd(n(p.VALOR_ESCRITORIO) - n(p.TARIFA));
     titulo = tipo === 'tarifas' ? 'Tarifas bancárias' : 'Receita — ' + cat;
-    cols = ['Crédito','Pasta / cliente','Descrição','Valor do crédito','Entrou nesta linha'];
+    cols = ['Crédito','Pasta / cliente','Descrição',{t:'Valor do crédito',num:1},
+            {t:'Entrou nesta linha',num:1}].concat(colunaEditar());
     recb.filter(p => casaCat(catParcela(p))).forEach(p => {
       const v = valorP(p); if (!v) return; total += v; const l = lancDe(p.LANC_ID);
       linhas.push([dataBR(p.DATA_CREDITO), pastaCliente(l.PASTA, l.CLIENTE),
-                   esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR), nMoeda(v)]);
+                   esc(p.TIPO + (p.NUM>0 ? ' ' + p.NUM : '')), nMoeda(p.VALOR_CREDITADO||p.VALOR),
+                   nMoeda(v)].concat(botaoEditar('parcela', p.ID)));
     });
     crRec.filter(c => casaCat(c.CATEGORIA || '—')).forEach(c => {
       const v = tipo === 'tarifas' ? n(c.TARIFA)
               : rd((n(c.VALOR_ESCRITORIO) || n(c.VALOR)) - n(c.TARIFA));
       if (!v) return; total += v;
       linhas.push([dataBR(c.DATA_RECEB), pastaCliente(c.PASTA, c.CLIENTE), esc(c.DESCRICAO||'—'),
-                   nMoeda(c.VALOR), nMoeda(v)]);
+                   nMoeda(c.VALOR), nMoeda(v)].concat(botaoEditar('receber', c.ID)));
     });
 
   } else {
@@ -8074,26 +8121,40 @@ function detalheDRE(chave, grupoDaTela, mesIni, mesFim){
       .filter(c => soA(c.CATEGORIA || 'Outras despesas', cat))
       .sort((a,b) => String(a.VENCIMENTO).localeCompare(String(b.VENCIMENTO)));
     titulo = 'Despesas — ' + cat;
-    cols = ['Vencimento','Descrição','Favorecido','Categoria','Situação','Valor'];
+    // a coluna Categoria saiu: é a mesma em toda a lista e está no título da
+    // janela; sem ela a descrição e o favorecido ficam lado a lado sem rolagem
+    cols = ['Vencimento','Descrição','Favorecido','Situação',{t:'Valor',num:1}].concat(colunaEditar());
     linhas = contas.map(c => { total += n(c.VALOR);
-      return [dataBR(c.VENCIMENTO), esc(c.DESCRICAO||'—'), esc(c.FAVORECIDO||'—'), esc(c.CATEGORIA||'—'),
+      return [dataBR(c.VENCIMENTO), esc(c.DESCRICAO||'—'), esc(c.FAVORECIDO||'—'),
               '<span class="tag '+(c.STATUS==='Pago'?'t-ok':'t-pend')+'">'+esc(c.STATUS)
-              + (c.DATA_PGTO ? ' ' + dataBR(c.DATA_PGTO) : '')+'</span>', nMoeda(c.VALOR)]; });
+              + (c.DATA_PGTO ? ' ' + dataBR(c.DATA_PGTO) : '')+'</span>',
+              nMoeda(c.VALOR)].concat(botaoEditar('pagar', c.ID)); });
   }
 
   modal(titulo + ' — ' + rotuloPer,
     tabelaDetalhe(cols, linhas, total),
     '<button class="btn sec" onclick="fecharModal()">Fechar</button>', 'larga');
 }
+/* Uma coluna pode vir como {t:'Valor', num:1}: as de dinheiro ficam estreitas e
+   alinhadas à direita, e as de texto podem quebrar linha — assim a janela cabe
+   na tela em vez de pedir rolagem para o lado. */
 function tabelaDetalhe(cols, linhas, total){
   if (!linhas.length) return vazio('Nada neste período','Nenhum lançamento compõe este total.');
   const ultima = cols.length - 1;
-  return '<div class="tw"><table class="densa"><thead><tr>'
-    + cols.map((c,i) => '<th'+(i===ultima?' class="num"':'')+'>'+esc(c)+'</th>').join('')
+  const algumNum = cols.some(c => c && c.num);
+  const ehNum = (c,i) => (c && c.num) ? true : (!algumNum && i === ultima);
+  const titulo2 = c => String(c && c.t != null ? c.t : c);
+  // o total vai sob a última coluna de dinheiro; o que vier depois dela (a
+  // coluna dos botões) fica em branco no rodapé
+  const iTot = cols.reduce((acc,c,i) => (c && c.num) ? i : acc, ultima);
+  return '<div class="tw"><table class="densa det"><thead><tr>'
+    + cols.map((c,i) => '<th'+(ehNum(c,i)?' class="num"':'')+'>'+esc(titulo2(c))+'</th>').join('')
     + '</tr></thead><tbody>'
-    + linhas.map(l => '<tr>' + l.map((v,i) => '<td'+(i===ultima?' class="num"':'')+'>'+v+'</td>').join('') + '</tr>').join('')
-    + '</tbody><tfoot><tr><th colspan="'+ultima+'" style="text-align:right">Total — '+linhas.length+' lançamento(s)</th>'
-    + '<th class="num">'+nMoeda(total)+'</th></tr></tfoot></table></div>';
+    + linhas.map(l => '<tr>' + l.map((v,i) => '<td'+(ehNum(cols[i],i)?' class="num"':'')+'>'+v+'</td>').join('') + '</tr>').join('')
+    + '</tbody><tfoot><tr><th colspan="'+iTot+'" style="text-align:right">Total — '+linhas.length+' lançamento(s)</th>'
+    + '<th class="num">'+nMoeda(total)+'</th>'
+    + Array(ultima - iTot).fill('<th></th>').join('')
+    + '</tr></tfoot></table></div>';
 }
 
 
